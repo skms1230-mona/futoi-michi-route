@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>太い道ルート</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=BIZ+UDPGothic:wght@400;700&display=swap">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+/* 構成: 案内標識の青を地色に、入力→地図→候補→Googleマップへの一本道。スマホは縦一列、PCは左に操作・右に地図 */
+:root {
+  --bg: #eef2f6; --surface: #ffffff; --fg: #15202c; --muted: #566575; --line: #cbd5df;
+  --sign: #0b4ea2; --sign-fg: #ffffff; --warn: #8a5a00; --warn-bg: #ffe9b3; --ok: #1b7443; --danger: #b3261e;
+  --sans: "BIZ UDPGothic", "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, sans-serif;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0f1720; --surface: #1a2531; --fg: #e8eef4; --muted: #9fb0c0; --line: #33434f;
+  --sign: #6ea8f2; --sign-fg: #0b1a2c; --warn: #ffd27a; --warn-bg: #4a3610; --ok: #6fd39c; --danger: #ff9a92; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #0f1720; --surface: #1a2531; --fg: #e8eef4; --muted: #9fb0c0; --line: #33434f;
+  --sign: #6ea8f2; --sign-fg: #0b1a2c; --warn: #ffd27a; --warn-bg: #4a3610; --ok: #6fd39c; --danger: #ff9a92; color-scheme: dark }
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 16px; line-height: 1.6;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: calc(16px + env(safe-area-inset-top, 0px)) calc(32px + env(safe-area-inset-bottom, 0px)); }
+.app { max-width: 1120px; margin: 0 auto; display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 900px) { .app { grid-template-columns: minmax(0, 400px) minmax(0, 1fr); align-items: start; }
+  .result-col { grid-column: 2; grid-row: 1 / span 2; } }
+header h1 { margin: 0; font-size: 1.6rem; line-height: 1.3; }
+header p { margin: 4px 0 0; color: var(--muted); font-size: .92rem; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px; display: grid; gap: 14px; }
+label, .label { font-weight: 700; display: block; }
+.row { display: flex; gap: 8px; }
+.row > input { flex: 1; min-width: 0; }
+input[type="text"] { font: inherit; font-size: 16px; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 11px 12px; width: 100%; }
+button, .btn { font: inherit; font-weight: 700; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); padding: 10px 14px; cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+:focus-visible { outline: 3px solid var(--sign); outline-offset: 2px; }
+.primary { background: var(--sign); color: var(--sign-fg); border-color: var(--sign); width: 100%; font-size: 1.1rem; padding: 14px; }
+.text-btn { background: none; border: none; color: var(--sign); padding: 4px 0; font-weight: 700; }
+.chosen { font-size: .92rem; color: var(--ok); font-weight: 700; margin-top: 6px; overflow-wrap: anywhere; }
+.choices { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+.choices button { width: 100%; text-align: left; font-weight: 400; font-size: .95rem; overflow-wrap: anywhere; }
+.switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.switch input { width: 24px; height: 24px; accent-color: var(--sign); flex: none; }
+.switch small { display: block; font-weight: 400; color: var(--muted); }
+select { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 9px; }
+#status { min-height: 1.5em; font-size: .95rem; color: var(--muted); margin: 0; }
+#status.error { color: var(--danger); font-weight: 700; }
+.result-col { display: grid; gap: 14px; min-width: 0; }
+#map { height: 300px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); z-index: 0; }
+@media (min-width: 900px) { #map { height: 420px; } }
+.cards { display: grid; gap: 10px; }
+.card { display: grid; gap: 10px; width: 100%; text-align: left; font-weight: 400; background: var(--surface); padding: 14px; border: 2px solid var(--line); border-radius: 8px; }
+.card[aria-pressed="true"] { border-color: var(--sign); }
+.card-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.tag { background: var(--sign); color: var(--sign-fg); font-weight: 700; font-size: .85rem; padding: 2px 8px; border-radius: 3px; }
+.time { font-weight: 700; font-size: 1.25rem; font-variant-numeric: tabular-nums; }
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.stat b { display: block; font-size: 1.3rem; line-height: 1.2; font-variant-numeric: tabular-nums; }
+.stat span { font-size: .8rem; color: var(--muted); }
+.flags { font-size: .85rem; color: var(--muted); margin: 0; }
+.flags .bad { color: var(--warn); font-weight: 700; }
+.go { display: grid; gap: 10px; }
+.open-map { display: block; text-align: center; text-decoration: none; position: sticky; bottom: calc(10px + env(safe-area-inset-bottom, 0px)); z-index: 5; box-shadow: 0 2px 10px rgba(0,0,0,.3); }
+.check { margin: 0; padding-left: 1.3em; font-size: .92rem; }
+.turns { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.turns button { width: 100%; display: grid; grid-template-columns: 4.2em minmax(0, 1fr) auto; gap: 8px; align-items: baseline; text-align: left; font-weight: 400; font-size: .92rem; padding: 8px 10px; }
+.pill { font-size: .75rem; font-weight: 700; padding: 1px 6px; border-radius: 3px; background: var(--bg); color: var(--muted); white-space: nowrap; }
+.pill.warn { background: var(--warn-bg); color: var(--warn); }
+details summary { font-weight: 700; cursor: pointer; }
+details p, details ul { font-size: .9rem; color: var(--muted); }
+h2 { font-size: 1.05rem; margin: 0; }
+footer { font-size: .78rem; color: var(--muted); }
+footer a { color: inherit; }
+.mk { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font: 700 13px/1 var(--sans); background: #0b4ea2; color: #fff; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.45); }
+.mk.nosig { background: #e8a200; color: #1b1300; }
+.mk.way { background: #fff; color: #0b4ea2; border-color: #0b4ea2; width: 22px; height: 22px; font-size: 12px; }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<main class="app">
+  <div style="display:grid;gap:16px;min-width:0">
+    <header>
+      <h1>太い道ルート</h1>
+      <p>右折が少なく、狭い道と山道を避け、大きな道を通るルートを探してGoogleマップに渡します。</p>
+    </header>
+    <form id="form" class="panel" autocomplete="off">
+      <div>
+        <label for="from-q">出発地</label>
+        <div class="row">
+          <input id="from-q" type="text" enterkeyhint="search" placeholder="住所・施設名">
+          <button type="button" id="from-search">検索</button>
+        </div>
+        <button type="button" class="text-btn" id="use-here">現在地から出発する</button>
+        <div id="from-chosen" class="chosen" hidden></div>
+        <ul id="from-list" class="choices" hidden></ul>
+      </div>
+      <div>
+        <label for="to-q">目的地</label>
+        <div class="row">
+          <input id="to-q" type="text" enterkeyhint="search" placeholder="住所・施設名">
+          <button type="button" id="to-search">検索</button>
+        </div>
+        <div id="to-chosen" class="chosen" hidden></div>
+        <ul id="to-list" class="choices" hidden></ul>
+        <button type="button" class="text-btn" id="swap">出発地と目的地を入れ替える</button>
+      </div>
+      <label class="switch" for="hw">
+        <span>高速道路を使う<small>オフのときは高速と有料道路を避けます</small></span>
+        <input id="hw" type="checkbox">
+      </label>
+      <div class="switch">
+        <label for="n">Googleマップへ渡す中継地点<small style="display:block;font-weight:400;color:var(--muted)">多いほど、このルートどおりに案内されます</small></label>
+        <select id="n">
+          <option value="3">3か所</option>
+          <option value="6" selected>6か所</option>
+          <option value="9">9か所</option>
+        </select>
+      </div>
+      <button class="primary" id="run" type="submit">ルートを探す</button>
+      <p id="status" role="status" aria-live="polite"></p>
+    </form>
+    <details class="panel">
+      <summary>車で使う前に</summary>
+      <ul>
+        <li>Googleマップのアプリで、ルートオプションの「高速道路を使わない」をオンにしておくと、中継地点の間で高速に入りにくくなります。</li>
+        <li>iPhoneをCarPlayにつないだ状態で「Googleマップで開く」を押し、ナビが始まったら車の画面で案内を確認します。</li>
+        <li>発進前に、Googleマップの青い線がこのページの地図と同じ道を通っているか見比べてください。Googleマップ側で道が変わることがあります。</li>
+        <li>道の情報はOpenStreetMapの登録内容によるため、実際の道幅や信号と違うことがあります。</li>
+      </ul>
+    </details>
+  </div>
+  <div class="result-col">
+    <div id="map" role="img" aria-label="ルートの地図"></div>
+    <div id="results" hidden style="display:grid;gap:14px">
+      <div class="cards" id="cards"></div>
+      <a id="open" class="btn primary open-map" target="_blank" rel="noopener">Googleマップで開く</a>
+      <div class="go panel">
+        <ol class="check">
+          <li>発進前に、Googleマップの線がこの地図と同じ道か確認する</li>
+          <li>途中の中継地点は通過点です。到着の案内が出たら、次の案内に進んでください</li>
+        </ol>
+      </div>
+      <div class="panel">
+        <h2 id="turns-title">このルートの右折</h2>
+        <ul class="turns" id="turns"></ul>
+      </div>
+    </div>
+    <footer>地図: <a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener">地理院タイル</a> / 経路: Valhalla（FOSSGIS） / 道路データ: © OpenStreetMap contributors / 住所検索: 国土地理院・Nominatim</footer>
+  </div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+'use strict';
+const VALHALLA = 'https://valhalla1.openstreetmap.de';
+const MIN_GAP_MS = 1150;
+const LARGE = new Set(['motorway', 'trunk', 'primary', 'secondary']);
+const NARROW = new Set(['unclassified', 'residential', 'service_other']);
+const CLASS_VALUE = { motorway: 1, trunk: 5, primary: 5, secondary: 4, tertiary: 2, unclassified: 0, residential: 0, service_other: -1 };
+const RIGHT_TYPES = new Set([10, 11, 12, 13]);
+const SLIGHT_RIGHT = 9;
+const $ = id => document.getElementById(id);
+const state = { from: null, to: null, candidates: [], selected: 0 };
+
+/* ---------- 通信 ---------- */
+let nextAt = 0;
+async function paced() {
+  const now = Date.now(), wait = Math.max(0, nextAt - now);
+  nextAt = Math.max(now, nextAt) + MIN_GAP_MS;
+  if (wait) await new Promise(r => setTimeout(r, wait));
+}
+async function valhalla(path, body) {
+  for (let attempt = 0; ; attempt++) {
+    await paced();
+    const res = await fetch(`${VALHALLA}/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (res.status === 429 && attempt < 2) { await new Promise(r => setTimeout(r, 2500)); continue; }
+    const json = await res.json().catch(() => null);
+    if (!res.ok) { const e = new Error((json && json.error) || `HTTP ${res.status}`); e.status = res.status; e.code = json && json.error_code; throw e; }
+    return json;
+  }
+}
+function decode(str) {
+  const pts = []; let i = 0, lat = 0, lon = 0;
+  const next = () => { let r = 0, s = 0, b; do { b = str.charCodeAt(i++) - 63; r |= (b & 31) << s; s += 5; } while (b >= 32); return r & 1 ? ~(r >> 1) : r >> 1; };
+  while (i < str.length) { lat += next(); lon += next(); pts.push([lat / 1e6, lon / 1e6]); }
+  return pts;
+}
+function dist2(a, b) { const dx = (a[1] - b[1]) * Math.cos(a[0] * Math.PI / 180); const dy = a[0] - b[0]; return dx * dx + dy * dy; }
+function routeBody(opts) {
+  const hw = opts.hw;
+  const body = {
+    locations: [{ lat: state.from.lat, lon: state.from.lon, type: 'break' }, { lat: state.to.lat, lon: state.to.lon, type: 'break' }],
+    costing: 'auto',
+    costing_options: { auto: { use_highways: hw ? 0.7 : 0, use_tolls: hw ? 0.7 : 0, use_living_streets: 0, use_tracks: 0, use_ferry: 0.2, maneuver_penalty: opts.maneuver, service_penalty: opts.service || 60, use_distance: 0 } },
+    language: 'ja-JP', directions_options: { units: 'km' }
+  };
+  if (opts.alternates) body.alternates = opts.alternates;
+  if (opts.exclude && opts.exclude.length) body.exclude_locations = opts.exclude.map(p => ({ lat: p[0], lon: p[1] }));
+  return body;
+}
+
+/* ---------- ルートの評価 ---------- */
+function toCandidate(trip, label) {
+  const leg = trip.legs[0];
+  return { trip, label, shape: decode(leg.shape), maneuvers: leg.maneuvers, minutes: trip.summary.time / 60, km: trip.summary.length, analysis: null };
+}
+function preScore(c) {
+  const rights = c.maneuvers.filter(m => RIGHT_TYPES.has(m.type)).length;
+  return c.minutes + 3 * rights;
+}
+function isSame(a, b) { return Math.abs(a.km - b.km) < Math.max(0.15, a.km * 0.004) && Math.abs(a.minutes - b.minutes) < 1 && a.maneuvers.length === b.maneuvers.length; }
+function addUnique(list, c) { if (!list.some(x => isSame(x, c))) list.push(c); }
+
+async function analyze(c) {
+  let trace = null;
+  try { trace = await valhalla('trace_attributes', { encoded_polyline: c.trip.legs[0].shape, costing: 'auto', shape_match: 'edge_walk', directions_options: { units: 'km' } }); }
+  catch (e) { console.warn('trace failed', e); }
+  c.analysis = summarize(c, trace);
+}
+function summarize(c, trace) {
+  const a = { hasRoad: !!trace, narrowKm: 0, largeKm: 0, motorwayKm: 0, tollKm: 0, unpavedKm: 0, mountainKm: 0, rights: [], slight: 0, cand: [] };
+  const edges = trace ? trace.edges : [];
+  const tshape = trace ? decode(trace.shape) : [];
+  let cum = 0, run = 0;
+  const closeRun = () => { if (run >= 1) a.mountainKm += run; run = 0; };
+  const maneuverKm = []; let mk = 0;
+  c.maneuvers.forEach(m => { maneuverKm.push(mk); mk += m.length; });
+  for (const e of edges) {
+    const km = e.length || 0, rc = e.road_class;
+    if (NARROW.has(rc) || ['alley', 'driveway', 'parking_aisle', 'track'].includes(e.use)) a.narrowKm += km;
+    if (LARGE.has(rc)) a.largeKm += km;
+    if (rc === 'motorway') a.motorwayKm += km;
+    if (e.toll) a.tollKm += km;
+    if (e.unpaved) a.unpavedKm += km;
+    const steep = Math.abs(e.weighted_grade || 0) >= 4 || (e.max_upward_grade || 0) >= 10;
+    const high = (e.mean_elevation || 0) >= 400;
+    if (rc !== 'motorway' && !e.tunnel && (e.density === undefined || e.density <= 4) && (steep || high)) run += km; else if (km > 0.05) closeRun();
+    if (km >= 0.06 && e.use === 'road' && !e.tunnel && !e.bridge && !e.internal_intersection && !e.roundabout) {
+      const mid = pointAt(tshape, e.begin_shape_index, e.end_shape_index);
+      if (mid) a.cand.push({ km: cum + km / 2, pt: mid, value: CLASS_VALUE[rc] ?? 0 });
+    }
+    cum += km;
+  }
+  closeRun();
+  a.cand.forEach(p => { p.gap = Math.min(...maneuverKm.map(k => Math.abs(k - p.km))); });
+  if (!trace) c.maneuvers.forEach((m, i) => { if (m.length >= 0.3) a.cand.push({ km: maneuverKm[i] + m.length / 2, pt: c.shape[Math.floor((m.begin_shape_index + m.end_shape_index) / 2)], value: 2, gap: m.length / 2 }); });
+  c.maneuvers.forEach((m, i) => {
+    if (m.type === SLIGHT_RIGHT) a.slight++;
+    if (!RIGHT_TYPES.has(m.type)) return;
+    const pt = c.shape[m.begin_shape_index];
+    a.rights.push({ pt, afterPt: c.shape[Math.min(m.begin_shape_index + 2, m.end_shape_index)], km: maneuverKm[i], name: (m.street_names || []).filter(s => !/^[0-9]+$/.test(s))[0] || '', uturn: m.type === 12 || m.type === 13, signal: trace ? signalNear(edges, tshape, pt) : null });
+  });
+  a.noSignal = a.rights.filter(r => r.signal === false).length;
+  a.largePct = c.km > 0 ? Math.round(a.largeKm / c.km * 100) : 0;
+  return a;
+}
+function pointAt(shape, i, j) { if (!shape.length || j <= i) return null; const m = (i + j) / 2, f = Math.floor(m), t = m - f; if (t === 0 || f + 1 >= shape.length) return shape[f]; return [shape[f][0] + (shape[f + 1][0] - shape[f][0]) * t, shape[f][1] + (shape[f + 1][1] - shape[f][1]) * t]; }
+function signalNear(edges, tshape, pt) {
+  let best = -1, bd = Infinity;
+  tshape.forEach((p, i) => { const d = dist2(p, pt); if (d < bd) { bd = d; best = i; } });
+  let k = edges.findIndex(e => e.end_shape_index >= best);
+  if (k < 0) return false;
+  for (let j = k, d = 0; j >= 0 && d <= 0.05; j--) { if (edges[j].end_node && edges[j].end_node.traffic_signal) return true; d += edges[j].length; }
+  const nx = edges[k + 1];
+  return !!(nx && nx.length < 0.03 && nx.end_node && nx.end_node.traffic_signal);
+}
+function score(c, hw) {
+  const a = c.analysis;
+  const signal = a.rights.length - a.noSignal;
+  return c.minutes + 2 * signal + 5 * a.noSignal + 0.5 * a.slight + 5 * a.narrowKm + 8 * a.mountainKm + (hw ? 0 : 20 * (a.motorwayKm + a.tollKm)) + 10 * a.unpavedKm;
+}
+function chooseWaypoints(c, n) {
+  const T = c.km, count = Math.min(n, Math.floor(T / 0.8));
+  if (count <= 0) return [];
+  const pool = c.analysis.cand.filter(p => p.km > 0.35 && p.km < T - 0.35 && p.gap >= 0.08);
+  const step = T / (count + 1), win = step * 0.42, out = [];
+  for (let i = 1; i <= count; i++) {
+    const target = step * i;
+    let best = null, bv = -Infinity;
+    for (const p of pool) {
+      if (Math.abs(p.km - target) > win) continue;
+      if (out.length && p.km - out[out.length - 1].km < 0.3) continue;
+      const v = p.value + Math.min(p.gap, 0.5) * 2 - Math.abs(p.km - target) / win;
+      if (v > bv) { bv = v; best = p; }
+    }
+    if (best) out.push(best);
+  }
+  return out;
+}
+function mapsUrl(c, n) {
+  const fmt = p => `${p[0].toFixed(6)}%2C${p[1].toFixed(6)}`;
+  const parts = ['api=1', 'travelmode=driving', 'dir_action=navigate', `destination=${fmt([state.to.lat, state.to.lon])}`];
+  if (!state.from.here) parts.push(`origin=${fmt([state.from.lat, state.from.lon])}`);
+  const w = chooseWaypoints(c, n);
+  if (w.length) parts.push(`waypoints=${w.map(p => fmt(p.pt)).join('%7C')}`);
+  return `https://www.google.com/maps/dir/?${parts.join('&')}`;
+}
+
+/* ---------- 検索の流れ ---------- */
+function say(text, isError) { const s = $('status'); s.textContent = text; s.classList.toggle('error', !!isError); }
+async function findRoutes() {
+  const hw = $('hw').checked;
+  const list = [];
+  const variants = [
+    { name: '標準', maneuver: 10, alternates: 2 },
+    { name: '曲がり少なめ', maneuver: 90, alternates: 1 },
+    { name: '大通り優先', maneuver: 30, service: 180, alternates: 1 }
+  ];
+  let i = 0, lastErr = null;
+  for (const v of variants) {
+    say(`ルート候補を計算しています（${++i}/${variants.length}）`);
+    try {
+      const r = await valhalla('route', routeBody({ ...v, hw }));
+      addUnique(list, toCandidate(r.trip, v.name));
+      (r.alternates || []).forEach(x => addUnique(list, toCandidate(x.trip, v.name)));
+    } catch (e) { lastErr = e; console.warn(v.name, e); }
+  }
+  if (!list.length) throw lastErr || new Error('no route');
+  const fastest = Math.min(...list.map(c => c.minutes));
+  const top = list.filter(c => c.minutes <= fastest * 1.6 + 5).sort((a, b) => preScore(a) - preScore(b)).slice(0, 3);
+  let done = 0;
+  for (const c of top) { say(`道の太さと右折を調べています（${++done}/${top.length}）`); await analyze(c); }
+  top.sort((a, b) => score(a, hw) - score(b, hw));
+  const base = top[0].analysis.rights;
+  const risky = base.filter(r => r.km > 0.4 && r.km < top[0].km - 0.4);
+  const targets = (risky.some(r => r.signal === false) ? risky.filter(r => r.signal === false) : risky).slice(0, 5);
+  if (targets.length) {
+    say('危ない右折を外したルートを試しています');
+    try {
+      const r = await valhalla('route', routeBody({ maneuver: 30, hw, exclude: targets.map(t => t.afterPt) }));
+      const c = toCandidate(r.trip, '右折を外した案');
+      if (c.minutes <= fastest * 1.6 + 5 && !top.some(x => isSame(x, c))) { await analyze(c); top.push(c); }
+    } catch (e) { console.warn('exclude pass', e); }
+  }
+  return rank(top, hw);
+}
+function rank(all, hw) {
+  const clean = all.filter(c => c.analysis.motorwayKm + c.analysis.tollKm <= 0.05);
+  const list = !hw && clean.length ? clean : all;
+  list.forEach(c => { c.score = score(c, hw); c.tags = []; });
+  list.sort((a, b) => a.score - b.score);
+  const picks = [list[0]];
+  list[0].tags.push('おすすめ');
+  const fewest = [...list].sort((a, b) => a.analysis.rights.length - b.analysis.rights.length || a.score - b.score)[0];
+  const fast = [...list].sort((a, b) => a.minutes - b.minutes)[0];
+  if (fewest !== list[0] && fewest.analysis.rights.length < list[0].analysis.rights.length) { fewest.tags.push('右折が最少'); picks.push(fewest); }
+  if (fast !== list[0] && !picks.includes(fast) && fast.minutes < list[0].minutes - 1) { fast.tags.push('早く着く'); picks.push(fast); }
+  for (const c of list) { if (picks.length >= 3) break; if (!picks.includes(c)) { c.tags.push('別の候補'); picks.push(c); } }
+  return picks;
+}
+
+/* ---------- 画面 ---------- */
+let map = null, layer = null;
+function initMap() {
+  if (!window.L || map) return;
+  map = L.map('map', { zoomControl: true }).setView([35.8617, 139.9708], 11);
+  L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', { maxZoom: 18, attribution: '地理院タイル' }).addTo(map);
+  layer = L.layerGroup().addTo(map);
+}
+function fmtMin(m) { const r = Math.round(m); return r >= 60 ? `${Math.floor(r / 60)}時間${r % 60}分` : `${r}分`; }
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+function stat(v, l) { const d = el('div', 'stat'); d.append(el('b', '', v), el('span', '', l)); return d; }
+function renderCards() {
+  const box = $('cards'); box.replaceChildren();
+  state.candidates.forEach((c, i) => {
+    const a = c.analysis;
+    const b = el('button', 'card'); b.type = 'button'; b.setAttribute('aria-pressed', String(i === state.selected));
+    const top = el('div', 'card-top');
+    top.append(el('span', 'tag', c.tags[0] || '候補'), el('span', 'time', `${fmtMin(c.minutes)}・${c.km.toFixed(1)}km`));
+    const stats = el('div', 'stats');
+    stats.append(stat(`${a.rights.length}回`, a.hasRoad ? `右折（無信号${a.noSignal}）` : '右折'), stat(a.hasRoad ? `${a.narrowKm.toFixed(1)}km` : '不明', '狭い道'), stat(a.hasRoad ? `${a.largePct}%` : '不明', '大きな道の割合'));
+    const flags = el('p', 'flags');
+    const notes = [];
+    if (a.mountainKm >= 1) notes.push([`山道 約${a.mountainKm.toFixed(1)}km`, true]);
+    if (a.motorwayKm + a.tollKm > 0.05) notes.push([`高速・有料 ${Math.max(a.motorwayKm, a.tollKm).toFixed(1)}km`, !$('hw').checked]);
+    if (a.unpavedKm > 0.05) notes.push([`未舗装 ${a.unpavedKm.toFixed(1)}km`, true]);
+    if (!a.hasRoad) notes.push(['道の太さを調べられませんでした（長距離のルートなど）', true]);
+    if (!notes.length) notes.push(['山道なし', false]);
+    notes.forEach(([t, bad], n) => { if (n) flags.append('、'); flags.append(el('span', bad ? 'bad' : '', t)); });
+    b.append(top, stats, flags);
+    b.addEventListener('click', () => { state.selected = i; renderAll(); });
+    box.append(b);
+  });
+}
+function renderTurns() {
+  const c = state.candidates[state.selected], ul = $('turns'); ul.replaceChildren();
+  $('turns-title').textContent = `このルートの右折（${c.analysis.rights.length}回）`;
+  if (!c.analysis.rights.length) { ul.append(el('li', '', 'このルートに右折はありません。')); return; }
+  c.analysis.rights.forEach(r => {
+    const li = el('li'), b = el('button'); b.type = 'button';
+    const s = r.signal === null ? el('span', 'pill', '信号不明') : r.signal ? el('span', 'pill', '信号あり') : el('span', 'pill warn', '信号なし');
+    b.append(el('span', '', `${r.km.toFixed(1)}km`), el('span', '', r.uturn ? `Uターン ${r.name}` : (r.name ? `${r.name}へ右折` : '右折')), s);
+    b.addEventListener('click', () => { if (map) { map.setView(r.pt, 17); $('map').scrollIntoView({ block: 'center' }); } });
+    li.append(b); ul.append(li);
+  });
+}
+function icon(cls, text) { return L.divIcon({ className: '', html: `<div class="mk ${cls}">${text}</div>`, iconSize: [26, 26], iconAnchor: [13, 13] }); }
+function renderMap() {
+  if (!map) return;
+  layer.clearLayers();
+  state.candidates.forEach((c, i) => { if (i !== state.selected) L.polyline(c.shape, { color: '#7a8794', weight: 5, opacity: .7 }).addTo(layer); });
+  const c = state.candidates[state.selected];
+  L.polyline(c.shape, { color: '#ffffff', weight: 9, opacity: .9 }).addTo(layer);
+  const line = L.polyline(c.shape, { color: '#0b4ea2', weight: 6 }).addTo(layer);
+  c.analysis.rights.forEach(r => L.marker(r.pt, { icon: icon(r.signal === false ? 'nosig' : '', '右'), title: r.signal === false ? '信号なしの右折' : '右折' }).addTo(layer));
+  chooseWaypoints(c, +$('n').value).forEach((w, i) => L.marker(w.pt, { icon: icon('way', i + 1), title: `中継地点${i + 1}` }).addTo(layer));
+  map.fitBounds(line.getBounds(), { padding: [24, 24] });
+}
+function renderAll() {
+  const c = state.candidates[state.selected];
+  renderCards(); renderTurns(); renderMap();
+  $('open').href = mapsUrl(c, +$('n').value);
+}
+
+/* ---------- 地名検索 ---------- */
+function shortName(s) { return s.replace(/, 日本$/, '').replace(/, \d{3}-?\d{4}/, ''); }
+async function geocode(q) {
+  const out = [];
+  const addr = /[都道府県市区町村]|丁目|番地/.test(q);
+  const [gsi, nom] = await Promise.allSettled([
+    fetch(`https://msearch.gsi.go.jp/address-search/AddressSearch?q=${encodeURIComponent(q)}`).then(r => r.json()),
+    fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&countrycodes=jp&accept-language=ja&q=${encodeURIComponent(q)}`).then(r => r.json())
+  ]);
+  const a = gsi.status === 'fulfilled' ? gsi.value.slice(0, 5).map(f => ({ label: f.properties.title, lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0] })) : [];
+  const b = nom.status === 'fulfilled' ? nom.value.map(p => ({ label: shortName(p.display_name), lat: +p.lat, lon: +p.lon })) : [];
+  if (gsi.status === 'rejected' && nom.status === 'rejected') throw new Error('geocode');
+  (addr ? [...a, ...b] : [...b, ...a]).forEach(p => { if (!out.some(x => dist2([x.lat, x.lon], [p.lat, p.lon]) < 1e-7)) out.push(p); });
+  return out.slice(0, 6);
+}
+function setPlace(key, place) {
+  state[key] = place;
+  $(`${key}-list`).hidden = true;
+  const c = $(`${key}-chosen`);
+  c.hidden = !place; c.textContent = place ? `設定済み: ${place.label}` : '';
+}
+async function searchPlace(key) {
+  const q = $(`${key}-q`).value.trim();
+  if (!q) { say(`${key === 'from' ? '出発地' : '目的地'}の住所か施設名を入れてください`, true); return; }
+  say('場所を探しています');
+  let found;
+  try { found = await geocode(q); }
+  catch { say('場所の検索に失敗しました。通信状態を確かめて、もう一度押してください', true); return; }
+  const ul = $(`${key}-list`); ul.replaceChildren();
+  if (!found.length) { ul.hidden = true; say('見つかりませんでした。市区町村名を付けて入れ直してください', true); return; }
+  found.forEach(p => { const li = el('li'), b = el('button', '', p.label); b.type = 'button'; b.addEventListener('click', () => { setPlace(key, p); $(`${key}-q`).value = p.label; say(''); }); li.append(b); ul.append(li); });
+  ul.hidden = false; say('当てはまる場所を選んでください');
+}
+function useHere() {
+  if (!navigator.geolocation) { say('この端末では現在地を使えません。住所を入れてください', true); return; }
+  say('現在地を確認しています');
+  navigator.geolocation.getCurrentPosition(
+    p => { setPlace('from', { label: '現在地', lat: p.coords.latitude, lon: p.coords.longitude, here: true }); $('from-q').value = ''; say(''); },
+    () => say('現在地を取得できませんでした。位置情報の許可を確かめるか、住所を入れてください', true),
+    { enableHighAccuracy: true, timeout: 15000 });
+}
+function explain(e) {
+  if (e.code === 171 || /No path could be found/i.test(e.message)) return 'この2地点を結ぶ道が見つかりませんでした。出発地か目的地を近くの大きな道に変えてください';
+  if (e.status === 429) return '経路サービスが混み合っています。少し待ってからもう一度押してください';
+  return 'ルートの計算に失敗しました。通信状態を確かめて、もう一度押してください';
+}
+async function run(ev) {
+  ev.preventDefault();
+  if (!state.from || !state.to) { say('出発地と目的地を、検索して候補から選んでください', true); return; }
+  const btn = $('run'); btn.disabled = true;
+  try {
+    state.candidates = await findRoutes();
+    state.selected = 0;
+    $('results').hidden = false;
+    renderAll();
+    say(`${state.candidates.length}件のルートが見つかりました`);
+    if (window.innerWidth < 900) $('map').scrollIntoView({ block: 'start' });
+    if (map) map.invalidateSize();
+  } catch (e) { console.error(e); say(explain(e), true); }
+  finally { btn.disabled = false; }
+}
+['from', 'to'].forEach(k => {
+  $(`${k}-search`).addEventListener('click', () => searchPlace(k));
+  $(`${k}-q`).addEventListener('keydown', e => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); searchPlace(k); } });
+  $(`${k}-q`).addEventListener('input', () => setPlace(k, null));
+});
+$('use-here').addEventListener('click', useHere);
+$('swap').addEventListener('click', () => {
+  const f = state.from, t = state.to, fq = $('from-q').value, tq = $('to-q').value;
+  setPlace('from', t); setPlace('to', f); $('from-q').value = tq; $('to-q').value = fq;
+});
+$('n').addEventListener('change', () => { if (state.candidates.length) renderAll(); });
+$('hw').addEventListener('change', () => say(state.candidates.length ? '高速の設定を変えました。ルートを探し直してください' : ''));
+$('form').addEventListener('submit', run);
+initMap();
+window.__app = { state, setPlace, findRoutes, chooseWaypoints, mapsUrl, renderAll, score };
+</script>
+</body>
+</html>
