@@ -22,6 +22,7 @@
   --bg: #0f1720; --surface: #1a2531; --fg: #e8eef4; --muted: #9fb0c0; --line: #33434f;
   --sign: #6ea8f2; --sign-fg: #0b1a2c; --warn: #ffd27a; --warn-bg: #4a3610; --ok: #6fd39c; --danger: #ff9a92; color-scheme: dark }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html { -webkit-text-size-adjust: 100%; }
 body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 16px; line-height: 1.6;
   padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
@@ -80,6 +81,12 @@ footer { font-size: .78rem; color: var(--muted); }
 footer a { color: inherit; }
 .mk { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font: 700 13px/1 var(--sans); background: #0b4ea2; color: #fff; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.45); }
 .mk.nosig { background: #e8a200; color: #1b1300; }
+.warn-panel { border: 2px solid var(--danger); gap: 8px; }
+.warn-panel p { margin: 0; font-weight: 700; color: var(--danger); }
+.ack { display: flex; gap: 8px; align-items: center; font-weight: 400; }
+.ack input { width: 22px; height: 22px; flex: none; accent-color: var(--danger); }
+.open-map.locked { opacity: .45; cursor: not-allowed; }
+.tag.alert { background: var(--danger); color: var(--surface); }
 .mk.merge { background: #b3261e; }
 .mk.way { background: #fff; color: #0b4ea2; border-color: #0b4ea2; width: 22px; height: 22px; font-size: 12px; }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
@@ -135,6 +142,7 @@ footer a { color: inherit; }
         <li>iPhoneをCarPlayにつないだ状態で「Googleマップで開く」を押し、ナビが始まったら車の画面で案内を確認します。</li>
         <li>発進前に、Googleマップの青い線がこのページの地図と同じ道を通っているか見比べてください。Googleマップ側で道が変わることがあります。</li>
         <li>道の情報はOpenStreetMapの登録内容によるため、実際の道幅や信号と違うことがあります。</li>
+        <li>すれ違いできない山道は、地図に登録された車線数・中央線・道幅と道路の種別で判定します。未登録の道は見落とすことがあるため、山道が赤やオレンジで出たルートは特に確認してください。</li>
         <li>所要時間と最速ルートとの差は、このアプリの計算による目安です。渋滞は含まず、Googleマップの表示とは異なります。</li>
       </ul>
     </details>
@@ -143,6 +151,10 @@ footer a { color: inherit; }
     <div id="map" role="img" aria-label="ルートの地図"></div>
     <div id="results" hidden style="display:grid;gap:14px">
       <div class="cards" id="cards"></div>
+      <div id="hard-warn" class="panel warn-panel" hidden>
+        <p id="hard-text"></p>
+        <label id="ack-row" class="ack" for="ack"><input id="ack" type="checkbox"><span>内容を確認したうえでGoogleマップで開く</span></label>
+      </div>
       <a id="open" class="btn primary open-map" target="_blank" rel="noopener">Googleマップで開く</a>
       <div class="go panel">
         <ol class="check">
@@ -171,6 +183,11 @@ const CLASS_VALUE = { motorway: 1, trunk: 5, primary: 5, secondary: 4, tertiary:
 const RIGHT_TYPES = new Set([10, 11, 12, 13]);
 const SLIGHT_RIGHT = 9;
 const MERGE_TYPES = new Set([25, 37, 38]);
+const LOW_MOUNTAIN = new Set(['tertiary', 'unclassified', 'residential', 'service_other']);
+const MIN_RUN_KM = 0.15;
+const END_MARGIN_KM = 0.7;
+const MOUNTAIN_ROUNDS = 5;
+const wayTags = new Map();
 const $ = id => document.getElementById(id);
 const state = { from: null, to: null, candidates: [], selected: 0, fastestMin: Infinity };
 
@@ -232,7 +249,7 @@ async function analyze(c) {
   c.analysis = summarize(c, trace);
 }
 function summarize(c, trace) {
-  const a = { hasRoad: !!trace, narrowKm: 0, largeKm: 0, motorwayKm: 0, tollKm: 0, unpavedKm: 0, mountainKm: 0, rights: [], merges: [], slight: 0, cand: [] };
+  const a = { hasRoad: !!trace, narrowKm: 0, largeKm: 0, motorwayKm: 0, tollKm: 0, unpavedKm: 0, mountainKm: 0, rights: [], merges: [], slight: 0, cand: [], mtEdges: [], runs: [], hardKm: 0, unknownKm: 0, tagsOk: true };
   const edges = trace ? trace.edges : [];
   const tshape = trace ? decode(trace.shape) : [];
   let cum = 0, run = 0;
@@ -252,7 +269,10 @@ function summarize(c, trace) {
     if (e.unpaved) a.unpavedKm += km;
     const steep = Math.abs(e.weighted_grade || 0) >= 4 || (e.max_upward_grade || 0) >= 10;
     const high = (e.mean_elevation || 0) >= 400;
-    if (rc !== 'motorway' && !e.tunnel && (e.density === undefined || e.density <= 4) && (steep || high)) run += km; else if (km > 0.05) closeRun();
+    if (rc !== 'motorway' && !e.tunnel && (e.density === undefined || e.density <= 4) && (steep || high)) {
+      run += km;
+      a.mtEdges.push({ way: e.way_id, km, at: cum, cls: rc, pts: tshape.slice(e.begin_shape_index, e.end_shape_index + 1) });
+    } else if (km > 0.05) closeRun();
     if (km >= 0.06 && e.use === 'road' && !e.tunnel && !e.bridge && !e.internal_intersection && !e.roundabout) {
       const mid = pointAt(tshape, e.begin_shape_index, e.end_shape_index);
       if (mid) a.cand.push({ km: cum + km / 2, pt: mid, value: CLASS_VALUE[rc] ?? 0 });
@@ -279,6 +299,52 @@ function summarize(c, trace) {
   a.largePct = c.km > 0 ? Math.round(a.largeKm / c.km * 100) : 0;
   return a;
 }
+async function loadWayTags(list) {
+  const ids = [...new Set(list.flatMap(c => c.analysis.mtEdges.map(e => e.way)))].filter(id => !wayTags.has(id));
+  try { for (let i = 0; i < ids.length; i += 150) await fetchWays(ids.slice(i, i + 150)); return true; }
+  catch (e) { console.warn('osm ways', e.message); return false; }
+}
+async function fetchWays(ids) {
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 12000);
+  try {
+    const res = await fetch(`https://api.openstreetmap.org/api/0.6/ways.json?ways=${ids.join(',')}`, { signal: ctl.signal });
+    if (res.status === 404 || res.status === 410) {
+      if (ids.length === 1) { wayTags.set(ids[0], {}); return; }
+      const half = Math.ceil(ids.length / 2);
+      await fetchWays(ids.slice(0, half)); await fetchWays(ids.slice(half));
+      return;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json();
+    json.elements.forEach(w => wayTags.set(w.id, w.tags || {}));
+  } finally { clearTimeout(timer); }
+}
+function judgeWay(cls, t) {
+  const tags = t || {};
+  if (tags.oneway === 'yes' || tags.oneway === '-1') return 'ok';
+  const lanes = parseInt(tags.lanes, 10), width = parseFloat(tags.width || tags.est_width);
+  if (tags.lane_markings === 'no' || lanes === 1 || width < 5 || tags.narrow === 'yes') return 'hard';
+  if (lanes >= 2 || width >= 5 || tags.lane_markings === 'yes') return 'ok';
+  return LOW_MOUNTAIN.has(cls) ? 'hard' : 'unknown';
+}
+function classifyMountain(c, tagsOk) {
+  const a = c.analysis;
+  a.tagsOk = tagsOk; a.hardKm = 0; a.unknownKm = 0; a.runs = [];
+  let cur = null;
+  const flush = () => { if (cur && cur.km >= MIN_RUN_KM && cur.end > END_MARGIN_KM && cur.from < c.km - END_MARGIN_KM) { a.runs.push(cur); a.hardKm += cur.hardKm; a.unknownKm += cur.km - cur.hardKm; } cur = null; };
+  for (const e of a.mtEdges) {
+    const v = judgeWay(e.cls, wayTags.get(e.way));
+    if (v === 'ok') { flush(); continue; }
+    if (cur && e.at - cur.end > 0.05) flush();
+    if (!cur) cur = { from: e.at, end: e.at, km: 0, hardKm: 0, pts: [] };
+    cur.km += e.km; cur.end = e.at + e.km; cur.pts.push(...e.pts);
+    if (v === 'hard') cur.hardKm += e.km;
+  }
+  flush();
+  a.runs.forEach(r => { r.mid = r.pts[Math.floor(r.pts.length / 2)]; r.hard = r.hardKm > 0; });
+}
+async function analyzeFull(c) { await analyze(c); classifyMountain(c, await loadWayTags([c])); }
+const mountainBad = c => c.analysis.hardKm + c.analysis.unknownKm >= MIN_RUN_KM;
 function pointAt(shape, i, j) { if (!shape.length || j <= i) return null; const m = (i + j) / 2, f = Math.floor(m), t = m - f; if (t === 0 || f + 1 >= shape.length) return shape[f]; return [shape[f][0] + (shape[f + 1][0] - shape[f][0]) * t, shape[f][1] + (shape[f + 1][1] - shape[f][1]) * t]; }
 function signalNear(edges, tshape, pt) {
   let best = -1, bd = Infinity;
@@ -292,7 +358,7 @@ function signalNear(edges, tshape, pt) {
 function score(c, hw) {
   const a = c.analysis;
   const signal = a.rights.length - a.noSignal;
-  return c.minutes + 2 * signal + 5 * a.noSignal + 6 * a.merges.length + 0.5 * a.slight + 5 * a.narrowKm + 8 * a.mountainKm + (hw ? 0 : 20 * (a.motorwayKm + a.tollKm)) + 10 * a.unpavedKm;
+  return c.minutes + 2 * signal + 5 * a.noSignal + 6 * a.merges.length + 30 * a.hardKm + 15 * a.unknownKm + 0.5 * a.slight + 5 * a.narrowKm + 8 * a.mountainKm + (hw ? 0 : 20 * (a.motorwayKm + a.tollKm)) + 10 * a.unpavedKm;
 }
 function chooseWaypoints(c, n) {
   const T = c.km, count = Math.min(n, Math.floor(T / 0.8));
@@ -347,6 +413,9 @@ async function findRoutes() {
   const top = list.filter(c => c.minutes <= fastest * 1.6 + 5).sort((a, b) => preScore(a) - preScore(b)).slice(0, 3);
   let done = 0;
   for (const c of top) { say(`道の太さと右折を調べています（${++done}/${top.length}）`); await analyze(c); }
+  say('山道の道幅を確かめています');
+  const tagsOk = await loadWayTags(top);
+  top.forEach(c => classifyMountain(c, tagsOk));
   top.sort((a, b) => score(a, hw) - score(b, hw));
   const base = top[0].analysis.rights;
   const risky = base.filter(r => r.km > 0.4 && r.km < top[0].km - 0.4);
@@ -358,16 +427,33 @@ async function findRoutes() {
     try {
       const r = await valhalla('route', routeBody({ maneuver: 30, hw, exclude: targets }));
       const c = toCandidate(r.trip, '右折を外した案');
-      if (c.minutes <= fastest * 1.6 + 5 && !top.some(x => isSame(x, c))) { await analyze(c); top.push(c); }
+      if (c.minutes <= fastest * 1.6 + 5 && !top.some(x => isSame(x, c))) { await analyzeFull(c); top.push(c); }
     } catch (e) { console.warn('exclude pass', e); }
+  }
+  const banned = [];
+  for (let round = 1; round <= MOUNTAIN_ROUNDS && top.every(mountainBad); round++) {
+    const best = [...top].sort((a, b) => score(a, hw) - score(b, hw))[0];
+    const pts = [...best.analysis.runs].sort((a, b) => Number(b.hard) - Number(a.hard) || b.km - a.km)
+      .filter(r => r.from > 0.4 && r.end < best.km - 0.4).slice(0, 8).map(r => r.mid)
+      .filter(p => !banned.some(b => dist2(b, p) < 1e-8));
+    if (!pts.length) break;
+    banned.push(...pts);
+    say(`すれ違いできない山道を外したルートを探しています（${round}/${MOUNTAIN_ROUNDS}）`);
+    try {
+      const r = await valhalla('route', routeBody({ maneuver: 30, hw, exclude: banned.slice(-40) }));
+      const c = toCandidate(r.trip, '山道を外した案');
+      if (top.some(x => isSame(x, c))) break;
+      await analyzeFull(c); top.push(c);
+    } catch (e) { console.warn('mountain pass', e); break; }
   }
   const picks = rank(top, hw);
   state.fastestMin = Math.min(baseMin, ...picks.map(c => c.minutes));
   return picks;
 }
 function rank(all, hw) {
-  const clean = all.filter(c => c.analysis.motorwayKm + c.analysis.tollKm <= 0.05);
-  const list = !hw && clean.length ? clean : all;
+  const keep = (arr, test) => { const f = arr.filter(test); return f.length ? f : arr; };
+  const safe = keep(keep(all, c => c.analysis.hardKm < MIN_RUN_KM), c => !mountainBad(c));
+  const list = hw ? safe : keep(safe, c => c.analysis.motorwayKm + c.analysis.tollKm <= 0.05);
   list.forEach(c => { c.score = score(c, hw); c.tags = []; });
   list.sort((a, b) => a.score - b.score);
   const picks = [list[0]];
@@ -400,15 +486,19 @@ function renderCards() {
     const b = el('button', 'card'); b.type = 'button'; b.setAttribute('aria-pressed', String(i === state.selected));
     const top = el('div', 'card-top');
     const over = Math.round(c.minutes - state.fastestMin);
-    top.append(el('span', 'tag', c.tags[0] || '候補'), el('span', 'time', `${fmtMin(c.minutes)}・${c.km.toFixed(1)}km`), el('span', 'delta', over <= 0 ? '最速ルートと同じ時間' : `最速ルートより +${fmtMin(over)}`));
+    const risky = a.hardKm >= MIN_RUN_KM;
+    top.append(el('span', risky ? 'tag alert' : 'tag', risky ? '要注意' : (c.tags[0] || '候補')), el('span', 'time', `${fmtMin(c.minutes)}・${c.km.toFixed(1)}km`), el('span', 'delta', over <= 0 ? '最速ルートと同じ時間' : `最速ルートより +${fmtMin(over)}`));
     const stats = el('div', 'stats');
     stats.append(stat(`${a.rights.length}回`, a.hasRoad ? `右折（無信号${a.noSignal}）` : '右折'), stat(`${a.merges.length}回`, '合流'), stat(a.hasRoad ? `${a.narrowKm.toFixed(1)}km` : '不明', '狭い道'), stat(a.hasRoad ? `${a.largePct}%` : '不明', '大きな道の割合'));
     const flags = el('p', 'flags');
     const notes = [];
+    if (a.hardKm >= MIN_RUN_KM) notes.push([`すれ違いできない可能性が高い山道 約${a.hardKm.toFixed(1)}km`, true]);
+    if (a.unknownKm >= MIN_RUN_KM) notes.push([`道幅が未登録の山道 約${a.unknownKm.toFixed(1)}km`, true]);
+    if (!a.tagsOk) notes.push(['山道の道幅データを取得できませんでした', true]);
     if (a.mountainKm >= 1) notes.push([`山道 約${a.mountainKm.toFixed(1)}km`, true]);
     if (a.motorwayKm + a.tollKm > 0.05) notes.push([`高速・有料 ${Math.max(a.motorwayKm, a.tollKm).toFixed(1)}km`, !$('hw').checked]);
     if (a.unpavedKm > 0.05) notes.push([`未舗装 ${a.unpavedKm.toFixed(1)}km`, true]);
-    if (!a.hasRoad) notes.push(['道の太さを調べられませんでした（長距離のルートなど）', true]);
+    if (!a.hasRoad) notes.push(['道の太さと山道の道幅を調べられませんでした（長距離のルートなど）', true]);
     if (!notes.length) notes.push(['山道なし', false]);
     notes.forEach(([t, bad], n) => { if (n) flags.append('、'); flags.append(el('span', bad ? 'bad' : '', t)); });
     b.append(top, stats, flags);
@@ -447,6 +537,7 @@ function renderMap() {
   const c = state.candidates[state.selected];
   L.polyline(c.shape, { color: '#ffffff', weight: 9, opacity: .9 }).addTo(layer);
   const line = L.polyline(c.shape, { color: '#0b4ea2', weight: 6 }).addTo(layer);
+  c.analysis.runs.forEach(r => L.polyline(r.pts, { color: r.hard ? '#d3201a' : '#f08c00', weight: 7 }).addTo(layer));
   c.analysis.rights.forEach(r => L.marker(r.pt, { icon: icon(r.signal === false ? 'nosig' : '', '右'), title: r.signal === false ? '信号なしの右折' : '右折' }).addTo(layer));
   c.analysis.merges.forEach(m => L.marker(m.pt, { icon: icon('merge', '合'), title: '合流' }).addTo(layer));
   chooseWaypoints(c, +$('n').value).forEach((w, i) => L.marker(w.pt, { icon: icon('way', i + 1), title: `中継地点${i + 1}` }).addTo(layer));
@@ -455,7 +546,20 @@ function renderMap() {
 function renderAll() {
   const c = state.candidates[state.selected];
   renderCards(); renderTurns(); renderMerges(); renderMap();
-  $('open').href = mapsUrl(c, +$('n').value);
+  const a = c.analysis, hard = a.hardKm >= MIN_RUN_KM, unknown = a.unknownKm >= MIN_RUN_KM;
+  $('hard-warn').hidden = !(hard || unknown || !a.tagsOk);
+  $('ack-row').hidden = !hard;
+  $('ack').checked = false;
+  $('hard-text').textContent = hard
+    ? `すれ違いできない可能性が高い山道が約${a.hardKm.toFixed(1)}kmあります（地図の赤い線）。ほかの道は見つかりませんでした。目的地を変えることをおすすめします。`
+    : unknown ? `道幅が登録されていない山道が約${a.unknownKm.toFixed(1)}kmあります（地図のオレンジの線）。発進前に道の様子を確認してください。`
+    : '山道の道幅データを取得できませんでした。少し待ってから探し直してください。';
+  updateOpen();
+}
+function updateOpen() {
+  const c = state.candidates[state.selected], link = $('open');
+  if (c.analysis.hardKm >= MIN_RUN_KM && !$('ack').checked) { link.removeAttribute('href'); link.classList.add('locked'); }
+  else { link.href = mapsUrl(c, +$('n').value); link.classList.remove('locked'); }
 }
 
 /* ---------- 地名検索 ---------- */
@@ -531,6 +635,7 @@ $('swap').addEventListener('click', () => {
 });
 $('n').addEventListener('change', () => { if (state.candidates.length) renderAll(); });
 $('hw').addEventListener('change', () => say(state.candidates.length ? '高速の設定を変えました。ルートを探し直してください' : ''));
+$('ack').addEventListener('change', updateOpen);
 $('form').addEventListener('submit', run);
 initMap();
 window.__app = { state, setPlace, findRoutes, chooseWaypoints, mapsUrl, renderAll, score };
