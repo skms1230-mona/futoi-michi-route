@@ -59,7 +59,9 @@ select { font: inherit; color: var(--fg); background: var(--bg); border: 1px sol
 .card-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 .tag { background: var(--sign); color: var(--sign-fg); font-weight: 700; font-size: .85rem; padding: 2px 8px; border-radius: 3px; }
 .time { font-weight: 700; font-size: 1.25rem; font-variant-numeric: tabular-nums; }
-.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.delta { width: 100%; text-align: right; font-size: .92rem; font-weight: 700; color: var(--muted); font-variant-numeric: tabular-nums; }
+.stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+@media (min-width: 520px) { .stats { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 .stat b { display: block; font-size: 1.3rem; line-height: 1.2; font-variant-numeric: tabular-nums; }
 .stat span { font-size: .8rem; color: var(--muted); }
 .flags { font-size: .85rem; color: var(--muted); margin: 0; }
@@ -78,6 +80,7 @@ footer { font-size: .78rem; color: var(--muted); }
 footer a { color: inherit; }
 .mk { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font: 700 13px/1 var(--sans); background: #0b4ea2; color: #fff; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.45); }
 .mk.nosig { background: #e8a200; color: #1b1300; }
+.mk.merge { background: #b3261e; }
 .mk.way { background: #fff; color: #0b4ea2; border-color: #0b4ea2; width: 22px; height: 22px; font-size: 12px; }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
 </style>
@@ -87,7 +90,7 @@ footer a { color: inherit; }
   <div style="display:grid;gap:16px;min-width:0">
     <header>
       <h1>太い道ルート</h1>
-      <p>右折が少なく、狭い道と山道を避け、大きな道を通るルートを探してGoogleマップに渡します。</p>
+      <p>右折と合流が少なく、狭い道と山道を避け、大きな道を通るルートを探してGoogleマップに渡します。</p>
     </header>
     <form id="form" class="panel" autocomplete="off">
       <div>
@@ -132,6 +135,7 @@ footer a { color: inherit; }
         <li>iPhoneをCarPlayにつないだ状態で「Googleマップで開く」を押し、ナビが始まったら車の画面で案内を確認します。</li>
         <li>発進前に、Googleマップの青い線がこのページの地図と同じ道を通っているか見比べてください。Googleマップ側で道が変わることがあります。</li>
         <li>道の情報はOpenStreetMapの登録内容によるため、実際の道幅や信号と違うことがあります。</li>
+        <li>所要時間と最速ルートとの差は、このアプリの計算による目安です。渋滞は含まず、Googleマップの表示とは異なります。</li>
       </ul>
     </details>
   </div>
@@ -149,6 +153,8 @@ footer a { color: inherit; }
       <div class="panel">
         <h2 id="turns-title">このルートの右折</h2>
         <ul class="turns" id="turns"></ul>
+        <h2 id="merges-title">このルートの合流</h2>
+        <ul class="turns" id="merges"></ul>
       </div>
     </div>
     <footer>地図: <a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener">地理院タイル</a> / 経路: Valhalla（FOSSGIS） / 道路データ: © OpenStreetMap contributors / 住所検索: 国土地理院・Nominatim</footer>
@@ -164,8 +170,9 @@ const NARROW = new Set(['unclassified', 'residential', 'service_other']);
 const CLASS_VALUE = { motorway: 1, trunk: 5, primary: 5, secondary: 4, tertiary: 2, unclassified: 0, residential: 0, service_other: -1 };
 const RIGHT_TYPES = new Set([10, 11, 12, 13]);
 const SLIGHT_RIGHT = 9;
+const MERGE_TYPES = new Set([25, 37, 38]);
 const $ = id => document.getElementById(id);
-const state = { from: null, to: null, candidates: [], selected: 0 };
+const state = { from: null, to: null, candidates: [], selected: 0, fastestMin: Infinity };
 
 /* ---------- 通信 ---------- */
 let nextAt = 0;
@@ -199,6 +206,7 @@ function routeBody(opts) {
     costing_options: { auto: { use_highways: hw ? 0.7 : 0, use_tolls: hw ? 0.7 : 0, use_living_streets: 0, use_tracks: 0, use_ferry: 0.2, maneuver_penalty: opts.maneuver, service_penalty: opts.service || 60, use_distance: 0 } },
     language: 'ja-JP', directions_options: { units: 'km' }
   };
+  if (opts.plain) body.costing_options.auto = { use_highways: hw ? 1 : 0, use_tolls: hw ? 1 : 0 };
   if (opts.alternates) body.alternates = opts.alternates;
   if (opts.exclude && opts.exclude.length) body.exclude_locations = opts.exclude.map(p => ({ lat: p[0], lon: p[1] }));
   return body;
@@ -211,7 +219,8 @@ function toCandidate(trip, label) {
 }
 function preScore(c) {
   const rights = c.maneuvers.filter(m => RIGHT_TYPES.has(m.type)).length;
-  return c.minutes + 3 * rights;
+  const merges = c.maneuvers.filter(m => MERGE_TYPES.has(m.type)).length;
+  return c.minutes + 3 * rights + 6 * merges;
 }
 function isSame(a, b) { return Math.abs(a.km - b.km) < Math.max(0.15, a.km * 0.004) && Math.abs(a.minutes - b.minutes) < 1 && a.maneuvers.length === b.maneuvers.length; }
 function addUnique(list, c) { if (!list.some(x => isSame(x, c))) list.push(c); }
@@ -223,15 +232,19 @@ async function analyze(c) {
   c.analysis = summarize(c, trace);
 }
 function summarize(c, trace) {
-  const a = { hasRoad: !!trace, narrowKm: 0, largeKm: 0, motorwayKm: 0, tollKm: 0, unpavedKm: 0, mountainKm: 0, rights: [], slight: 0, cand: [] };
+  const a = { hasRoad: !!trace, narrowKm: 0, largeKm: 0, motorwayKm: 0, tollKm: 0, unpavedKm: 0, mountainKm: 0, rights: [], merges: [], slight: 0, cand: [] };
   const edges = trace ? trace.edges : [];
   const tshape = trace ? decode(trace.shape) : [];
   let cum = 0, run = 0;
   const closeRun = () => { if (run >= 1) a.mountainKm += run; run = 0; };
   const maneuverKm = []; let mk = 0;
   c.maneuvers.forEach(m => { maneuverKm.push(mk); mk += m.length; });
-  for (const e of edges) {
+  for (const [idx, e] of edges.entries()) {
     const km = e.length || 0, rc = e.road_class;
+    const nx = edges[idx + 1];
+    if (e.use === 'ramp' && nx && nx.use !== 'ramp' && nx.use !== 'turn_channel' && !(e.end_node && e.end_node.traffic_signal) && ['motorway', 'trunk', 'primary', 'secondary'].includes(nx.road_class)) {
+      a.merges.push({ km: cum + km, pt: tshape[e.end_shape_index], before: tshape[Math.max(e.begin_shape_index, e.end_shape_index - 2)], name: '' });
+    }
     if (NARROW.has(rc) || ['alley', 'driveway', 'parking_aisle', 'track'].includes(e.use)) a.narrowKm += km;
     if (LARGE.has(rc)) a.largeKm += km;
     if (rc === 'motorway') a.motorwayKm += km;
@@ -250,11 +263,18 @@ function summarize(c, trace) {
   a.cand.forEach(p => { p.gap = Math.min(...maneuverKm.map(k => Math.abs(k - p.km))); });
   if (!trace) c.maneuvers.forEach((m, i) => { if (m.length >= 0.3) a.cand.push({ km: maneuverKm[i] + m.length / 2, pt: c.shape[Math.floor((m.begin_shape_index + m.end_shape_index) / 2)], value: 2, gap: m.length / 2 }); });
   c.maneuvers.forEach((m, i) => {
+    if (MERGE_TYPES.has(m.type)) {
+      const name = (m.street_names || []).filter(s => !/^[0-9]+$/.test(s))[0] || '';
+      const near = a.merges.find(x => Math.abs(x.km - maneuverKm[i]) < 0.3);
+      if (near) near.name = near.name || name;
+      else a.merges.push({ km: maneuverKm[i], pt: c.shape[m.begin_shape_index], before: c.shape[Math.max(0, m.begin_shape_index - 2)], name });
+    }
     if (m.type === SLIGHT_RIGHT) a.slight++;
     if (!RIGHT_TYPES.has(m.type)) return;
     const pt = c.shape[m.begin_shape_index];
     a.rights.push({ pt, afterPt: c.shape[Math.min(m.begin_shape_index + 2, m.end_shape_index)], km: maneuverKm[i], name: (m.street_names || []).filter(s => !/^[0-9]+$/.test(s))[0] || '', uturn: m.type === 12 || m.type === 13, signal: trace ? signalNear(edges, tshape, pt) : null });
   });
+  a.merges.sort((x, y) => x.km - y.km);
   a.noSignal = a.rights.filter(r => r.signal === false).length;
   a.largePct = c.km > 0 ? Math.round(a.largeKm / c.km * 100) : 0;
   return a;
@@ -272,7 +292,7 @@ function signalNear(edges, tshape, pt) {
 function score(c, hw) {
   const a = c.analysis;
   const signal = a.rights.length - a.noSignal;
-  return c.minutes + 2 * signal + 5 * a.noSignal + 0.5 * a.slight + 5 * a.narrowKm + 8 * a.mountainKm + (hw ? 0 : 20 * (a.motorwayKm + a.tollKm)) + 10 * a.unpavedKm;
+  return c.minutes + 2 * signal + 5 * a.noSignal + 6 * a.merges.length + 0.5 * a.slight + 5 * a.narrowKm + 8 * a.mountainKm + (hw ? 0 : 20 * (a.motorwayKm + a.tollKm)) + 10 * a.unpavedKm;
 }
 function chooseWaypoints(c, n) {
   const T = c.km, count = Math.min(n, Math.floor(T / 0.8));
@@ -307,15 +327,17 @@ async function findRoutes() {
   const hw = $('hw').checked;
   const list = [];
   const variants = [
+    { name: '最短時間', plain: true },
     { name: '標準', maneuver: 10, alternates: 2 },
     { name: '曲がり少なめ', maneuver: 90, alternates: 1 },
     { name: '大通り優先', maneuver: 30, service: 180, alternates: 1 }
   ];
-  let i = 0, lastErr = null;
+  let i = 0, lastErr = null, baseMin = Infinity;
   for (const v of variants) {
     say(`ルート候補を計算しています（${++i}/${variants.length}）`);
     try {
       const r = await valhalla('route', routeBody({ ...v, hw }));
+      if (v.plain) baseMin = r.trip.summary.time / 60;
       addUnique(list, toCandidate(r.trip, v.name));
       (r.alternates || []).forEach(x => addUnique(list, toCandidate(x.trip, v.name)));
     } catch (e) { lastErr = e; console.warn(v.name, e); }
@@ -328,16 +350,20 @@ async function findRoutes() {
   top.sort((a, b) => score(a, hw) - score(b, hw));
   const base = top[0].analysis.rights;
   const risky = base.filter(r => r.km > 0.4 && r.km < top[0].km - 0.4);
-  const targets = (risky.some(r => r.signal === false) ? risky.filter(r => r.signal === false) : risky).slice(0, 5);
+  const turnPts = (risky.some(r => r.signal === false) ? risky.filter(r => r.signal === false) : risky).map(t => t.afterPt);
+  const mergePts = hw ? [] : top[0].analysis.merges.filter(m => m.km > 0.4 && m.km < top[0].km - 0.4).map(m => m.before);
+  const targets = [...mergePts, ...turnPts].filter(Boolean).slice(0, 5);
   if (targets.length) {
-    say('危ない右折を外したルートを試しています');
+    say('負担の大きい右折と合流を外したルートを試しています');
     try {
-      const r = await valhalla('route', routeBody({ maneuver: 30, hw, exclude: targets.map(t => t.afterPt) }));
+      const r = await valhalla('route', routeBody({ maneuver: 30, hw, exclude: targets }));
       const c = toCandidate(r.trip, '右折を外した案');
       if (c.minutes <= fastest * 1.6 + 5 && !top.some(x => isSame(x, c))) { await analyze(c); top.push(c); }
     } catch (e) { console.warn('exclude pass', e); }
   }
-  return rank(top, hw);
+  const picks = rank(top, hw);
+  state.fastestMin = Math.min(baseMin, ...picks.map(c => c.minutes));
+  return picks;
 }
 function rank(all, hw) {
   const clean = all.filter(c => c.analysis.motorwayKm + c.analysis.tollKm <= 0.05);
@@ -349,7 +375,9 @@ function rank(all, hw) {
   const fewest = [...list].sort((a, b) => a.analysis.rights.length - b.analysis.rights.length || a.score - b.score)[0];
   const fast = [...list].sort((a, b) => a.minutes - b.minutes)[0];
   if (fewest !== list[0] && fewest.analysis.rights.length < list[0].analysis.rights.length) { fewest.tags.push('右折が最少'); picks.push(fewest); }
-  if (fast !== list[0] && !picks.includes(fast) && fast.minutes < list[0].minutes - 1) { fast.tags.push('早く着く'); picks.push(fast); }
+  const calm = [...list].sort((a, b) => a.analysis.merges.length - b.analysis.merges.length || a.score - b.score)[0];
+  if (calm !== list[0] && !picks.includes(calm) && calm.analysis.merges.length < list[0].analysis.merges.length) { calm.tags.push('合流が最少'); picks.push(calm); }
+  if (picks.length < 3 && fast !== list[0] && !picks.includes(fast) && fast.minutes < list[0].minutes - 1) { fast.tags.push('早く着く'); picks.push(fast); }
   for (const c of list) { if (picks.length >= 3) break; if (!picks.includes(c)) { c.tags.push('別の候補'); picks.push(c); } }
   return picks;
 }
@@ -371,9 +399,10 @@ function renderCards() {
     const a = c.analysis;
     const b = el('button', 'card'); b.type = 'button'; b.setAttribute('aria-pressed', String(i === state.selected));
     const top = el('div', 'card-top');
-    top.append(el('span', 'tag', c.tags[0] || '候補'), el('span', 'time', `${fmtMin(c.minutes)}・${c.km.toFixed(1)}km`));
+    const over = Math.round(c.minutes - state.fastestMin);
+    top.append(el('span', 'tag', c.tags[0] || '候補'), el('span', 'time', `${fmtMin(c.minutes)}・${c.km.toFixed(1)}km`), el('span', 'delta', over <= 0 ? '最速ルートと同じ時間' : `最速ルートより +${fmtMin(over)}`));
     const stats = el('div', 'stats');
-    stats.append(stat(`${a.rights.length}回`, a.hasRoad ? `右折（無信号${a.noSignal}）` : '右折'), stat(a.hasRoad ? `${a.narrowKm.toFixed(1)}km` : '不明', '狭い道'), stat(a.hasRoad ? `${a.largePct}%` : '不明', '大きな道の割合'));
+    stats.append(stat(`${a.rights.length}回`, a.hasRoad ? `右折（無信号${a.noSignal}）` : '右折'), stat(`${a.merges.length}回`, '合流'), stat(a.hasRoad ? `${a.narrowKm.toFixed(1)}km` : '不明', '狭い道'), stat(a.hasRoad ? `${a.largePct}%` : '不明', '大きな道の割合'));
     const flags = el('p', 'flags');
     const notes = [];
     if (a.mountainKm >= 1) notes.push([`山道 約${a.mountainKm.toFixed(1)}km`, true]);
@@ -399,6 +428,17 @@ function renderTurns() {
     li.append(b); ul.append(li);
   });
 }
+function renderMerges() {
+  const c = state.candidates[state.selected], ul = $('merges'); ul.replaceChildren();
+  $('merges-title').textContent = `このルートの合流（${c.analysis.merges.length}回）`;
+  if (!c.analysis.merges.length) { ul.append(el('li', '', 'このルートに合流はありません。')); return; }
+  c.analysis.merges.forEach(m => {
+    const li = el('li'), b = el('button'); b.type = 'button';
+    b.append(el('span', '', `${m.km.toFixed(1)}km`), el('span', '', m.name ? `${m.name}へ合流` : '合流'), el('span', 'pill warn', '合流'));
+    b.addEventListener('click', () => { if (map) { map.setView(m.pt, 17); $('map').scrollIntoView({ block: 'center' }); } });
+    li.append(b); ul.append(li);
+  });
+}
 function icon(cls, text) { return L.divIcon({ className: '', html: `<div class="mk ${cls}">${text}</div>`, iconSize: [26, 26], iconAnchor: [13, 13] }); }
 function renderMap() {
   if (!map) return;
@@ -408,12 +448,13 @@ function renderMap() {
   L.polyline(c.shape, { color: '#ffffff', weight: 9, opacity: .9 }).addTo(layer);
   const line = L.polyline(c.shape, { color: '#0b4ea2', weight: 6 }).addTo(layer);
   c.analysis.rights.forEach(r => L.marker(r.pt, { icon: icon(r.signal === false ? 'nosig' : '', '右'), title: r.signal === false ? '信号なしの右折' : '右折' }).addTo(layer));
+  c.analysis.merges.forEach(m => L.marker(m.pt, { icon: icon('merge', '合'), title: '合流' }).addTo(layer));
   chooseWaypoints(c, +$('n').value).forEach((w, i) => L.marker(w.pt, { icon: icon('way', i + 1), title: `中継地点${i + 1}` }).addTo(layer));
   map.fitBounds(line.getBounds(), { padding: [24, 24] });
 }
 function renderAll() {
   const c = state.candidates[state.selected];
-  renderCards(); renderTurns(); renderMap();
+  renderCards(); renderTurns(); renderMerges(); renderMap();
   $('open').href = mapsUrl(c, +$('n').value);
 }
 
