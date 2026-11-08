@@ -455,7 +455,9 @@ function rank(all, hw) {
   const safe = keep(keep(all, c => c.analysis.hardKm < MIN_RUN_KM), c => !mountainBad(c));
   const list = hw ? safe : keep(safe, c => c.analysis.motorwayKm + c.analysis.tollKm <= 0.05);
   list.forEach(c => { c.score = score(c, hw); c.tags = []; });
-  list.sort((a, b) => a.score - b.score);
+  const allHard = list.every(c => c.analysis.hardKm >= MIN_RUN_KM);
+  const byHard = (a, b) => a.analysis.hardKm - b.analysis.hardKm || a.score - b.score;
+  list.sort(allHard ? byHard : (a, b) => a.score - b.score);
   const picks = [list[0]];
   list[0].tags.push('おすすめ');
   const fewest = [...list].sort((a, b) => a.analysis.rights.length - b.analysis.rights.length || a.score - b.score)[0];
@@ -465,7 +467,7 @@ function rank(all, hw) {
   if (calm !== list[0] && !picks.includes(calm) && calm.analysis.merges.length < list[0].analysis.merges.length) { calm.tags.push('合流が最少'); picks.push(calm); }
   if (picks.length < 3 && fast !== list[0] && !picks.includes(fast) && fast.minutes < list[0].minutes - 1) { fast.tags.push('早く着く'); picks.push(fast); }
   for (const c of list) { if (picks.length >= 3) break; if (!picks.includes(c)) { c.tags.push('別の候補'); picks.push(c); } }
-  return picks;
+  return allHard ? picks.sort(byHard) : picks;
 }
 
 /* ---------- 画面 ---------- */
