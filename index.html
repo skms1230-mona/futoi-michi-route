@@ -48,6 +48,7 @@ button:disabled { opacity: .5; cursor: default; }
 .switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .switch input { width: 24px; height: 24px; accent-color: var(--sign); flex: none; }
 .switch small { display: block; font-weight: 400; color: var(--muted); }
+.switch select { max-width: 58%; }
 select { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 9px; }
 #status { min-height: 1.5em; font-size: .95rem; color: var(--muted); margin: 0; }
 #status.error { color: var(--danger); font-weight: 700; }
@@ -120,10 +121,14 @@ footer a { color: inherit; }
         <ul id="to-list" class="choices" hidden></ul>
         <button type="button" class="text-btn" id="swap">出発地と目的地を入れ替える</button>
       </div>
-      <label class="switch" for="hw">
-        <span>高速道路を使う<small>オフのときは高速と有料道路を避けます</small></span>
-        <input id="hw" type="checkbox">
-      </label>
+      <div class="switch">
+        <label for="hw">高速道路<small style="display:block;font-weight:400;color:var(--muted)">首都高などの都市高速だけを避けることもできます</small></label>
+        <select id="hw">
+          <option value="none" selected>使わない</option>
+          <option value="urban">使う（首都高などは避ける）</option>
+          <option value="all">使う（すべて）</option>
+        </select>
+      </div>
       <div class="switch">
         <label for="n">Googleマップへ渡す中継地点<small style="display:block;font-weight:400;color:var(--muted)">多いほど、このルートどおりに案内されます</small></label>
         <select id="n">
@@ -138,7 +143,8 @@ footer a { color: inherit; }
     <details class="panel">
       <summary>車で使う前に</summary>
       <ul>
-        <li>Googleマップのアプリで、ルートオプションの「高速道路を使わない」をオンにしておくと、中継地点の間で高速に入りにくくなります。</li>
+        <li>高速を「使わない」で探したときは、Googleマップのアプリのルートオプションで「高速道路を使わない」をオンにします。高速を使うルートのときはオフにします。</li>
+        <li>Googleマップには首都高だけを避ける設定がありません。首都高などを避けて探したときは、発進前に青い線が首都高を通っていないか確認してください。</li>
         <li>iPhoneをCarPlayにつないだ状態で「Googleマップで開く」を押し、ナビが始まったら車の画面で案内を確認します。</li>
         <li>発進前に、Googleマップの青い線がこのページの地図と同じ道を通っているか見比べてください。Googleマップ側で道が変わることがあります。</li>
         <li>道の情報はOpenStreetMapの登録内容によるため、実際の道幅や信号と違うことがあります。</li>
@@ -179,7 +185,11 @@ const VALHALLA = 'https://valhalla1.openstreetmap.de';
 const MIN_GAP_MS = 1150;
 const LARGE = new Set(['motorway', 'trunk', 'primary', 'secondary']);
 const NARROW = new Set(['unclassified', 'residential', 'service_other']);
-const CLASS_VALUE = { motorway: 1, trunk: 5, primary: 5, secondary: 4, tertiary: 2, unclassified: 0, residential: 0, service_other: -1 };
+const URBAN_EXPRESSWAY = /首都高|阪神高速|名古屋高速|都市高速|広島高速/;
+const URBAN_ROUNDS = 8;
+const CHUNK_KM = 100;
+const MAX_CHUNKED_KM = 600;
+const CLASS_VALUE = { motorway: 5, trunk: 5, primary: 5, secondary: 4, tertiary: 2, unclassified: 0, residential: 0, service_other: -1 };
 const RIGHT_TYPES = new Set([10, 11, 12, 13]);
 const SLIGHT_RIGHT = 9;
 const MERGE_TYPES = new Set([25, 37, 38]);
@@ -189,7 +199,7 @@ const END_MARGIN_KM = 0.7;
 const MOUNTAIN_ROUNDS = 5;
 const wayTags = new Map();
 const $ = id => document.getElementById(id);
-const state = { from: null, to: null, candidates: [], selected: 0, fastestMin: Infinity };
+const state = { from: null, to: null, candidates: [], selected: 0, fastestMin: Infinity, mode: 'none', urbanBan: [] };
 
 /* ---------- 通信 ---------- */
 let nextAt = 0;
@@ -225,7 +235,11 @@ function routeBody(opts) {
   };
   if (opts.plain) body.costing_options.auto = { use_highways: hw ? 1 : 0, use_tolls: hw ? 1 : 0 };
   if (opts.alternates) body.alternates = opts.alternates;
-  if (opts.exclude && opts.exclude.length) body.exclude_locations = opts.exclude.map(p => ({ lat: p[0], lon: p[1] }));
+  const excludes = [
+    ...(state.urbanBan || []).map(p => ({ lat: p[0], lon: p[1], search_filter: { min_road_class: 'trunk' } })),
+    ...(opts.exclude || []).map(p => ({ lat: p[0], lon: p[1] }))
+  ].slice(0, 50);
+  if (excludes.length) body.exclude_locations = excludes;
   return body;
 }
 
@@ -244,14 +258,64 @@ function addUnique(list, c) { if (!list.some(x => isSame(x, c))) list.push(c); }
 
 async function analyze(c) {
   let trace = null;
-  try { trace = await valhalla('trace_attributes', { encoded_polyline: c.trip.legs[0].shape, costing: 'auto', shape_match: 'edge_walk', directions_options: { units: 'km' } }); }
-  catch (e) { console.warn('trace failed', e); }
+  const whole = match => traceShape(c.trip.legs[0].shape, match);
+  const attempts = [() => whole('edge_walk')];
+  if (c.km < 190) attempts.push(() => whole('walk_or_snap'));
+  attempts.push(() => traceChunks(c));
+  for (const attempt of attempts) {
+    try { trace = await attempt(); break; }
+    catch (e) { console.warn('trace failed', e.message); }
+  }
   c.analysis = summarize(c, trace);
+}
+function traceShape(polyline, match) {
+  return valhalla('trace_attributes', { encoded_polyline: polyline, costing: 'auto', shape_match: match, directions_options: { units: 'km' } });
+}
+function encode(pts) {
+  const part = v => { let n = v < 0 ? ~(v << 1) : v << 1, out = ''; while (n >= 32) { out += String.fromCharCode((32 | (n & 31)) + 63); n >>>= 5; } return out + String.fromCharCode(n + 63); };
+  let s = '', pa = 0, po = 0;
+  for (const p of pts) { const la = Math.round(p[0] * 1e6), lo = Math.round(p[1] * 1e6); s += part(la - pa) + part(lo - po); pa = la; po = lo; }
+  return s;
+}
+async function traceChunks(c) {
+  if (c.km > MAX_CHUNKED_KM) throw new Error('too long to split');
+  const cuts = [0];
+  for (let i = 1, km = 0; i < c.shape.length; i++) {
+    km += Math.sqrt(dist2(c.shape[i - 1], c.shape[i])) * 111;
+    if (km >= CHUNK_KM && i < c.shape.length - 1) { cuts.push(i); km = 0; }
+  }
+  cuts.push(c.shape.length - 1);
+  const merged = { edges: [], pts: [] };
+  for (let i = 0; i + 1 < cuts.length; i++) {
+    const t = await traceShape(encode(c.shape.slice(cuts[i], cuts[i + 1] + 1)), 'walk_or_snap');
+    const off = merged.pts.length;
+    t.edges.forEach(e => merged.edges.push({ ...e, begin_shape_index: e.begin_shape_index + off, end_shape_index: e.end_shape_index + off }));
+    merged.pts.push(...decode(t.shape));
+  }
+  return merged;
+}
+const isUrban = m => URBAN_EXPRESSWAY.test([...(m.street_names || []), ...(m.begin_street_names || [])].join(' '));
+async function banUrbanExpressways() {
+  state.urbanBan = [];
+  for (let round = 1; round <= URBAN_ROUNDS && state.urbanBan.length < 48; round++) {
+    say(`首都高などを避ける道を探しています（${round}/${URBAN_ROUNDS}）`);
+    const before = [...state.urbanBan];
+    let trip;
+    try { trip = (await valhalla('route', routeBody({ plain: true, hw: true }))).trip; }
+    catch (e) { console.warn('urban ban', e.message); state.urbanBan = before.slice(0, -2); return; }
+    const pts = decode(trip.legs[0].shape), hits = trip.legs[0].maneuvers.filter(isUrban);
+    if (!hits.length) return;
+    hits.forEach(m => [1 / 3, 2 / 3].forEach(f => {
+      const p = pts[m.begin_shape_index + Math.floor((m.end_shape_index - m.begin_shape_index) * f)];
+      if (p && !state.urbanBan.some(b => dist2(b, p) < 1e-9)) state.urbanBan.push(p);
+    }));
+    if (state.urbanBan.length === before.length) return;
+  }
 }
 function summarize(c, trace) {
   const a = { hasRoad: !!trace, narrowKm: 0, largeKm: 0, motorwayKm: 0, tollKm: 0, unpavedKm: 0, mountainKm: 0, rights: [], merges: [], slight: 0, cand: [], mtEdges: [], runs: [], hardKm: 0, unknownKm: 0, tagsOk: true };
   const edges = trace ? trace.edges : [];
-  const tshape = trace ? decode(trace.shape) : [];
+  const tshape = trace ? (trace.pts || decode(trace.shape)) : [];
   let cum = 0, run = 0;
   const closeRun = () => { if (run >= 1) a.mountainKm += run; run = 0; };
   const maneuverKm = []; let mk = 0;
@@ -294,6 +358,7 @@ function summarize(c, trace) {
     const pt = c.shape[m.begin_shape_index];
     a.rights.push({ pt, afterPt: c.shape[Math.min(m.begin_shape_index + 2, m.end_shape_index)], km: maneuverKm[i], name: (m.street_names || []).filter(s => !/^[0-9]+$/.test(s))[0] || '', uturn: m.type === 12 || m.type === 13, signal: trace ? signalNear(edges, tshape, pt) : null });
   });
+  a.urbanKm = c.maneuvers.filter(isUrban).reduce((s, m) => s + m.length, 0);
   a.merges.sort((x, y) => x.km - y.km);
   a.noSignal = a.rights.filter(r => r.signal === false).length;
   a.largePct = c.km > 0 ? Math.round(a.largeKm / c.km * 100) : 0;
@@ -358,7 +423,7 @@ function signalNear(edges, tshape, pt) {
 function score(c, hw) {
   const a = c.analysis;
   const signal = a.rights.length - a.noSignal;
-  return c.minutes + 2 * signal + 5 * a.noSignal + 6 * a.merges.length + 30 * a.hardKm + 15 * a.unknownKm + 0.5 * a.slight + 5 * a.narrowKm + 8 * a.mountainKm + (hw ? 0 : 20 * (a.motorwayKm + a.tollKm)) + 10 * a.unpavedKm;
+  return c.minutes + 2 * signal + 5 * a.noSignal + 6 * a.merges.length + 30 * a.hardKm + 15 * a.unknownKm + (state.mode === 'urban' ? 40 * a.urbanKm : 0) + 0.5 * a.slight + 5 * a.narrowKm + 8 * a.mountainKm + (hw ? 0 : 20 * (a.motorwayKm + a.tollKm)) + 10 * a.unpavedKm;
 }
 function chooseWaypoints(c, n) {
   const T = c.km, count = Math.min(n, Math.floor(T / 0.8));
@@ -390,7 +455,10 @@ function mapsUrl(c, n) {
 /* ---------- 検索の流れ ---------- */
 function say(text, isError) { const s = $('status'); s.textContent = text; s.classList.toggle('error', !!isError); }
 async function findRoutes() {
-  const hw = $('hw').checked;
+  state.mode = $('hw').value;
+  state.urbanBan = [];
+  const hw = state.mode !== 'none';
+  if (state.mode === 'urban') await banUrbanExpressways();
   const list = [];
   const variants = [
     { name: '最短時間', plain: true },
@@ -453,7 +521,8 @@ async function findRoutes() {
 function rank(all, hw) {
   const keep = (arr, test) => { const f = arr.filter(test); return f.length ? f : arr; };
   const safe = keep(keep(all, c => c.analysis.hardKm < MIN_RUN_KM), c => !mountainBad(c));
-  const list = hw ? safe : keep(safe, c => c.analysis.motorwayKm + c.analysis.tollKm <= 0.05);
+  const noUrban = state.mode === 'urban' ? keep(safe, c => c.analysis.urbanKm <= 0.05) : safe;
+  const list = hw ? noUrban : keep(noUrban, c => c.analysis.motorwayKm + c.analysis.tollKm <= 0.05);
   list.forEach(c => { c.score = score(c, hw); c.tags = []; });
   const allHard = list.every(c => c.analysis.hardKm >= MIN_RUN_KM);
   const byHard = (a, b) => a.analysis.hardKm - b.analysis.hardKm || a.score - b.score;
@@ -498,9 +567,10 @@ function renderCards() {
     if (a.unknownKm >= MIN_RUN_KM) notes.push([`道幅が未登録の山道 約${a.unknownKm.toFixed(1)}km`, true]);
     if (!a.tagsOk) notes.push(['山道の道幅データを取得できませんでした', true]);
     if (a.mountainKm >= 1) notes.push([`山道 約${a.mountainKm.toFixed(1)}km`, true]);
-    if (a.motorwayKm + a.tollKm > 0.05) notes.push([`高速・有料 ${Math.max(a.motorwayKm, a.tollKm).toFixed(1)}km`, !$('hw').checked]);
+    if (a.motorwayKm + a.tollKm > 0.05) notes.push([`高速・有料 ${Math.max(a.motorwayKm, a.tollKm).toFixed(1)}km`, state.mode === 'none']);
+    if (a.urbanKm > 0.05) notes.push([`首都高などの都市高速 ${a.urbanKm.toFixed(1)}km`, state.mode !== 'all']);
     if (a.unpavedKm > 0.05) notes.push([`未舗装 ${a.unpavedKm.toFixed(1)}km`, true]);
-    if (!a.hasRoad) notes.push(['道の太さと山道の道幅を調べられませんでした（長距離のルートなど）', true]);
+    if (!a.hasRoad) notes.push(['道の太さと山道の道幅を調べられませんでした', true]);
     if (!notes.length) notes.push(['山道なし', false]);
     notes.forEach(([t, bad], n) => { if (n) flags.append('、'); flags.append(el('span', bad ? 'bad' : '', t)); });
     b.append(top, stats, flags);
@@ -549,12 +619,13 @@ function renderAll() {
   const c = state.candidates[state.selected];
   renderCards(); renderTurns(); renderMerges(); renderMap();
   const a = c.analysis, hard = a.hardKm >= MIN_RUN_KM, unknown = a.unknownKm >= MIN_RUN_KM;
-  $('hard-warn').hidden = !(hard || unknown || !a.tagsOk);
+  $('hard-warn').hidden = !(hard || unknown || !a.tagsOk || !a.hasRoad);
   $('ack-row').hidden = !hard;
   $('ack').checked = false;
   $('hard-text').textContent = hard
     ? `すれ違いできない可能性が高い山道が約${a.hardKm.toFixed(1)}kmあります（地図の赤い線）。ほかの道は見つかりませんでした。目的地を変えることをおすすめします。`
     : unknown ? `道幅が登録されていない山道が約${a.unknownKm.toFixed(1)}kmあります（地図のオレンジの線）。発進前に道の様子を確認してください。`
+    : !a.hasRoad ? 'このルートは道幅と山道を確認できていません。少し待ってから探し直してください。'
     : '山道の道幅データを取得できませんでした。少し待ってから探し直してください。';
   updateOpen();
 }
