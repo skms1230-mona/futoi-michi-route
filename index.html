@@ -89,6 +89,16 @@ footer a { color: inherit; }
 .open-map.locked { opacity: .45; cursor: not-allowed; }
 .tag.alert { background: var(--danger); color: var(--surface); }
 .mk.merge { background: #b3261e; }
+.mk.rest { background: #1b7443; }
+.rest-note { margin: 0; font-size: .88rem; color: var(--muted); }
+.rest-list { display: grid; gap: 12px; }
+.rest-slot { border: 1px solid var(--line); border-radius: 6px; margin: 0; padding: 10px 12px; display: grid; gap: 6px; min-width: 0; }
+.rest-slot legend { font-weight: 700; padding: 0 4px; }
+.rest-slot p { margin: 0; font-size: .88rem; color: var(--muted); }
+.rest-opt { display: flex; gap: 10px; align-items: flex-start; font-weight: 400; cursor: pointer; }
+.rest-opt input { width: 20px; height: 20px; margin-top: 2px; flex: none; accent-color: var(--ok); }
+.rest-opt span { display: grid; min-width: 0; overflow-wrap: anywhere; }
+.rest-opt small { color: var(--muted); font-size: .82rem; }
 .mk.way { background: #fff; color: #0b4ea2; border-color: #0b4ea2; width: 22px; height: 22px; font-size: 12px; }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
 </style>
@@ -130,6 +140,15 @@ footer a { color: inherit; }
         </select>
       </div>
       <div class="switch">
+        <label for="rest">もなとの休憩<small style="display:block;font-weight:400;color:var(--muted)">道中の道の駅と大きめの公園を提案します</small></label>
+        <select id="rest">
+          <option value="0">提案しない</option>
+          <option value="60">1時間ごと</option>
+          <option value="90" selected>1時間30分ごと</option>
+          <option value="120">2時間ごと</option>
+        </select>
+      </div>
+      <div class="switch">
         <label for="n">Googleマップへ渡す中継地点<small style="display:block;font-weight:400;color:var(--muted)">多いほど、このルートどおりに案内されます</small></label>
         <select id="n">
           <option value="3">3か所</option>
@@ -149,6 +168,7 @@ footer a { color: inherit; }
         <li>発進前に、Googleマップの青い線がこのページの地図と同じ道を通っているか見比べてください。Googleマップ側で道が変わることがあります。</li>
         <li>道の情報はOpenStreetMapの登録内容によるため、実際の道幅や信号と違うことがあります。</li>
         <li>すれ違いできない山道は、地図に登録された車線数・中央線・道幅と道路の種別で判定します。未登録の道は見落とすことがあるため、山道が赤やオレンジで出たルートは特に確認してください。</li>
+        <li>休憩スポットは地図データから探しています。犬の同伴や散歩ができるか、駐車場・営業時間は登録がないことが多いため、立ち寄る前に確認してください。</li>
         <li>所要時間と最速ルートとの差は、このアプリの計算による目安です。渋滞は含まず、Googleマップの表示とは異なります。</li>
       </ul>
     </details>
@@ -160,6 +180,11 @@ footer a { color: inherit; }
       <div id="hard-warn" class="panel warn-panel" hidden>
         <p id="hard-text"></p>
         <label id="ack-row" class="ack" for="ack"><input id="ack" type="checkbox"><span>内容を確認したうえでGoogleマップで開く</span></label>
+      </div>
+      <div id="rest-panel" class="panel" hidden>
+        <h2>もなとの休憩スポット</h2>
+        <p id="rest-note" class="rest-note"></p>
+        <div id="rest-list" class="rest-list"></div>
       </div>
       <a id="open" class="btn primary open-map" target="_blank" rel="noopener">Googleマップで開く</a>
       <div class="go panel">
@@ -230,10 +255,10 @@ function routeBody(opts) {
   const body = {
     locations: [{ lat: state.from.lat, lon: state.from.lon, type: 'break' }, { lat: state.to.lat, lon: state.to.lon, type: 'break' }],
     costing: 'auto',
-    costing_options: { auto: { use_highways: hw ? 0.7 : 0, use_tolls: hw ? 0.7 : 0, use_living_streets: 0, use_tracks: 0, use_ferry: 0.2, maneuver_penalty: opts.maneuver, service_penalty: opts.service || 60, use_distance: 0 } },
+    costing_options: { auto: { use_highways: hw ? 0.7 : 0, use_tolls: hw ? 0.7 : 0, use_living_streets: 0, use_tracks: 0, use_ferry: 0, maneuver_penalty: opts.maneuver, service_penalty: opts.service || 60, use_distance: 0 } },
     language: 'ja-JP', directions_options: { units: 'km' }
   };
-  if (opts.plain) body.costing_options.auto = { use_highways: hw ? 1 : 0, use_tolls: hw ? 1 : 0 };
+  if (opts.plain) body.costing_options.auto = { use_highways: hw ? 1 : 0, use_tolls: hw ? 1 : 0, use_ferry: 0 };
   if (opts.alternates) body.alternates = opts.alternates;
   const excludes = [
     ...(state.urbanBan || []).map(p => ({ lat: p[0], lon: p[1], search_filter: { min_road_class: 'trunk' } })),
@@ -313,7 +338,7 @@ async function banUrbanExpressways() {
   }
 }
 function summarize(c, trace) {
-  const a = { hasRoad: !!trace, narrowKm: 0, largeKm: 0, motorwayKm: 0, tollKm: 0, unpavedKm: 0, mountainKm: 0, rights: [], merges: [], slight: 0, cand: [], mtEdges: [], runs: [], hardKm: 0, unknownKm: 0, tagsOk: true };
+  const a = { hasRoad: !!trace, narrowKm: 0, largeKm: 0, motorwayKm: 0, tollKm: 0, unpavedKm: 0, mountainKm: 0, rights: [], merges: [], slight: 0, cand: [], mtEdges: [], runs: [], hardKm: 0, unknownKm: 0, tagsOk: true, motorRanges: [] };
   const edges = trace ? trace.edges : [];
   const tshape = trace ? (trace.pts || decode(trace.shape)) : [];
   let cum = 0, run = 0;
@@ -328,6 +353,7 @@ function summarize(c, trace) {
     }
     if (NARROW.has(rc) || ['alley', 'driveway', 'parking_aisle', 'track'].includes(e.use)) a.narrowKm += km;
     if (LARGE.has(rc)) a.largeKm += km;
+    if (rc === 'motorway') { const last = a.motorRanges[a.motorRanges.length - 1]; if (last && cum - last[1] < 0.3) last[1] = cum + km; else a.motorRanges.push([cum, cum + km]); }
     if (rc === 'motorway') a.motorwayKm += km;
     if (e.toll) a.tollKm += km;
     if (e.unpaved) a.unpavedKm += km;
@@ -359,6 +385,7 @@ function summarize(c, trace) {
     a.rights.push({ pt, afterPt: c.shape[Math.min(m.begin_shape_index + 2, m.end_shape_index)], km: maneuverKm[i], name: (m.street_names || []).filter(s => !/^[0-9]+$/.test(s))[0] || '', uturn: m.type === 12 || m.type === 13, signal: trace ? signalNear(edges, tshape, pt) : null });
   });
   a.urbanKm = c.maneuvers.filter(isUrban).reduce((s, m) => s + m.length, 0);
+  a.ferryMin = c.maneuvers.filter(m => m.type === 28).reduce((s, m) => s + m.time / 60, 0);
   a.merges.sort((x, y) => x.km - y.km);
   a.noSignal = a.rights.filter(r => r.signal === false).length;
   a.largePct = c.km > 0 ? Math.round(a.largeKm / c.km * 100) : 0;
@@ -443,13 +470,124 @@ function chooseWaypoints(c, n) {
   }
   return out;
 }
+function handoff(c, n) {
+  const stops = +$('rest').value && c.restEvery === +$('rest').value ? (c.rest || []).filter(s => s.pick >= 0).map(s => s.options[s.pick]) : [];
+  const pins = chooseWaypoints(c, Math.max(0, Math.min(n, 9 - stops.length))).filter(p => !stops.some(s => Math.abs(s.km - p.km) < 3));
+  return { stops, pins };
+}
 function mapsUrl(c, n) {
   const fmt = p => `${p[0].toFixed(6)}%2C${p[1].toFixed(6)}`;
   const parts = ['api=1', 'travelmode=driving', 'dir_action=navigate', `destination=${fmt([state.to.lat, state.to.lon])}`];
   if (!state.from.here) parts.push(`origin=${fmt([state.from.lat, state.from.lon])}`);
-  const w = chooseWaypoints(c, n);
+  const { stops, pins } = handoff(c, n);
+  const w = [...stops, ...pins].sort((x, y) => x.km - y.km);
   if (w.length) parts.push(`waypoints=${w.map(p => fmt(p.pt)).join('%7C')}`);
   return `https://www.google.com/maps/dir/?${parts.join('&')}`;
+}
+
+/* ---------- 休憩スポット ---------- */
+const REST_WINDOW_MIN = 15;
+let restToken = 0;
+function timeline(c) {
+  if (c.tAt) return;
+  const n = c.shape.length, tAt = new Array(n).fill(0), kmAt = new Array(n).fill(0);
+  for (let i = 1; i < n; i++) kmAt[i] = kmAt[i - 1] + Math.sqrt(dist2(c.shape[i - 1], c.shape[i])) * 111;
+  c.maneuvers.forEach(m => {
+    const b = m.begin_shape_index, e = Math.min(m.end_shape_index, n - 1), span = kmAt[e] - kmAt[b];
+    for (let i = b + 1; i <= e; i++) tAt[i] = tAt[b] + (span > 0 ? (kmAt[i] - kmAt[b]) / span : 1) * m.time;
+  });
+  c.tAt = tAt; c.kmAt = kmAt;
+}
+async function photon(q, tag, bb) {
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 12000);
+  try {
+    const res = await fetch(`https://photon.komoot.io/api/?limit=20&q=${encodeURIComponent(q)}&bbox=${bb.map(v => v.toFixed(4)).join(',')}${tag ? `&osm_tag=${tag}` : ''}`, { signal: ctl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()).features || [];
+  } finally { clearTimeout(timer); }
+}
+let nominatimNext = 0;
+async function nominatimParks(bb) {
+  const wait = Math.max(0, nominatimNext - Date.now());
+  nominatimNext = Math.max(Date.now(), nominatimNext) + 1100;
+  if (wait) await new Promise(r => setTimeout(r, wait));
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 12000);
+  try {
+    const res = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=40&bounded=1&accept-language=ja&viewbox=${bb[0].toFixed(4)},${bb[3].toFixed(4)},${bb[2].toFixed(4)},${bb[1].toFixed(4)}&q=park`, { signal: ctl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()).map(p => { const b = p.boundingbox.map(Number); return { name: p.name, pt: [+p.lat, +p.lon], size: Math.max(b[1] - b[0], b[3] - b[2]) }; });
+  } finally { clearTimeout(timer); }
+}
+const onMotorway = (c, km) => c.analysis.motorRanges.some(r => km >= r[0] - 0.3 && km <= r[1] + 0.3);
+async function findRestSpots(c, every) {
+  timeline(c);
+  const total = c.tAt[c.tAt.length - 1] / 60, slots = [];
+  for (let T = every; T < total - 20; T += every) {
+    const idx = [];
+    c.tAt.forEach((t, i) => { if (Math.abs(t / 60 - T) <= REST_WINDOW_MIN) idx.push(i); });
+    if (!idx.length) continue;
+    const lats = idx.map(i => c.shape[i][0]), lons = idx.map(i => c.shape[i][1]);
+    const bb = [Math.min(...lons) - 0.02, Math.min(...lats) - 0.02, Math.max(...lons) + 0.02, Math.max(...lats) + 0.02];
+    let found;
+    try {
+      const stations = (await photon('道の駅', '', bb)).map(f => ({ name: f.properties.name, pt: [f.geometry.coordinates[1], f.geometry.coordinates[0]], size: 0, kind: '道の駅' }));
+      const parks = (await nominatimParks(bb)).map(p => ({ ...p, kind: '公園' }));
+      found = [...stations, ...parks];
+    } catch (e) { console.warn('rest spots', e.message); slots.push({ T, error: true, options: [], pick: -1 }); continue; }
+    const seen = new Set(), options = [];
+    for (const { name: rawName, pt: p, size, kind } of found) {
+      const name = (rawName || '').trim(), key = name.replace(/[\s　]/g, '');
+      if (!name || seen.has(key) || (kind === '道の駅' && !/道の駅/.test(name))) continue;
+      if (kind === '公園' && (size < 0.002 || /児童|ちびっこ|子供広場|こども広場|墓地|霊園/.test(name))) continue;
+      if (options.some(o => o.kind === kind && Math.sqrt(dist2(o.pt, p)) * 111 < 0.4)) continue;
+      let best = -1, bd = Infinity;
+      for (const i of idx) { const d = dist2(c.shape[i], p); if (d < bd) { bd = d; best = i; } }
+      const offKm = Math.sqrt(bd) * 111;
+      if (offKm > (kind === '道の駅' ? 1.5 : 1.0)) continue;
+      seen.add(key);
+      const atMin = c.tAt[best] / 60;
+      options.push({ name, kind, pt: p, offKm, atMin, km: c.kmAt[best], motorway: onMotorway(c, c.kmAt[best]), score: Math.abs(atMin - T) + offKm * 6 + (kind === '公園' ? 5 - Math.min(size, 0.01) * 500 : 0) });
+    }
+    options.sort((x, y) => x.score - y.score);
+    slots.push({ T, options: options.slice(0, 3), pick: options.length ? 0 : -1 });
+  }
+  return slots;
+}
+async function ensureRest() {
+  const c = state.candidates[state.selected], every = +$('rest').value;
+  $('rest-panel').hidden = !every;
+  if (!every) { updateOpen(); renderMap(false); return; }
+  if (c.rest && c.restEvery === every) { renderRest(); return; }
+  const token = ++restToken;
+  $('rest-note').textContent = '休憩スポットを探しています';
+  $('rest-list').replaceChildren();
+  const slots = await findRestSpots(c, every);
+  if (token !== restToken || c !== state.candidates[state.selected]) return;
+  c.rest = slots; c.restEvery = every;
+  renderRest(); updateOpen(); renderMap(false);
+}
+function renderRest() {
+  const c = state.candidates[state.selected], box = $('rest-list'), slots = c.rest || [];
+  box.replaceChildren();
+  $('rest-note').textContent = !slots.length ? '所要時間が短いため、休憩の提案はありません。'
+    : '選んだ場所はGoogleマップのルートに立ち寄り先として入ります。犬の同伴や散歩ができるかは未確認のため、立ち寄る前に確認してください。';
+  slots.forEach((s, si) => {
+    const fs = el('fieldset', 'rest-slot');
+    fs.append(el('legend', '', `${si + 1}回目の休憩（出発から約${fmtMin(s.T)}）`));
+    if (s.error) fs.append(el('p', '', '候補を取得できませんでした。少し待ってから探し直してください。'));
+    else if (!s.options.length) fs.append(el('p', '', 'この時間の近くに、道の駅や大きめの公園が見つかりませんでした。'));
+    [...s.options.map((o, oi) => ({ o, oi })), { o: null, oi: -1 }].forEach(({ o, oi }) => {
+      if (!o && !s.options.length) return;
+      const lab = el('label', 'rest-opt'), r = document.createElement('input');
+      r.type = 'radio'; r.name = `rest-${si}`; r.id = `rest-${si}-${oi}`; r.checked = s.pick === oi;
+      r.addEventListener('change', () => { s.pick = oi; updateOpen(); renderMap(false); });
+      const txt = el('span');
+      if (o) txt.append(el('b', '', o.name), el('small', '', `${o.kind}・出発から約${fmtMin(o.atMin)}・ルートから${o.offKm < 0.1 ? 'すぐ' : `${o.offKm.toFixed(1)}km`}${o.kind === '公園' ? '・駐車場は未確認' : ''}${o.motorway ? '・高速を一度降ります' : ''}`));
+      else txt.append(el('b', '', '立ち寄らない'));
+      lab.append(r, txt); fs.append(lab);
+    });
+    box.append(fs);
+  });
 }
 
 /* ---------- 検索の流れ ---------- */
@@ -499,14 +637,15 @@ async function findRoutes() {
     } catch (e) { console.warn('exclude pass', e); }
   }
   const banned = [];
-  for (let round = 1; round <= MOUNTAIN_ROUNDS && top.every(mountainBad); round++) {
+  const rounds = top[0].km > 150 ? 3 : MOUNTAIN_ROUNDS;
+  for (let round = 1; round <= rounds && top.every(mountainBad); round++) {
     const best = [...top].sort((a, b) => score(a, hw) - score(b, hw))[0];
     const pts = [...best.analysis.runs].sort((a, b) => Number(b.hard) - Number(a.hard) || b.km - a.km)
       .filter(r => r.from > 0.4 && r.end < best.km - 0.4).slice(0, 8).map(r => r.mid)
       .filter(p => !banned.some(b => dist2(b, p) < 1e-8));
     if (!pts.length) break;
     banned.push(...pts);
-    say(`すれ違いできない山道を外したルートを探しています（${round}/${MOUNTAIN_ROUNDS}）`);
+    say(`すれ違いできない山道を外したルートを探しています（${round}/${rounds}）`);
     try {
       const r = await valhalla('route', routeBody({ maneuver: 30, hw, exclude: banned.slice(-40) }));
       const c = toCandidate(r.trip, '山道を外した案');
@@ -569,6 +708,7 @@ function renderCards() {
     if (a.mountainKm >= 1) notes.push([`山道 約${a.mountainKm.toFixed(1)}km`, true]);
     if (a.motorwayKm + a.tollKm > 0.05) notes.push([`高速・有料 ${Math.max(a.motorwayKm, a.tollKm).toFixed(1)}km`, state.mode === 'none']);
     if (a.urbanKm > 0.05) notes.push([`首都高などの都市高速 ${a.urbanKm.toFixed(1)}km`, state.mode !== 'all']);
+    if (a.ferryMin > 0) notes.push([`フェリー 約${fmtMin(a.ferryMin)}`, true]);
     if (a.unpavedKm > 0.05) notes.push([`未舗装 ${a.unpavedKm.toFixed(1)}km`, true]);
     if (!a.hasRoad) notes.push(['道の太さと山道の道幅を調べられませんでした', true]);
     if (!notes.length) notes.push(['山道なし', false]);
@@ -602,7 +742,7 @@ function renderMerges() {
   });
 }
 function icon(cls, text) { return L.divIcon({ className: '', html: `<div class="mk ${cls}">${text}</div>`, iconSize: [26, 26], iconAnchor: [13, 13] }); }
-function renderMap() {
+function renderMap(fit = true) {
   if (!map) return;
   layer.clearLayers();
   state.candidates.forEach((c, i) => { if (i !== state.selected) L.polyline(c.shape, { color: '#7a8794', weight: 5, opacity: .7 }).addTo(layer); });
@@ -612,8 +752,10 @@ function renderMap() {
   c.analysis.runs.forEach(r => L.polyline(r.pts, { color: r.hard ? '#d3201a' : '#f08c00', weight: 7 }).addTo(layer));
   c.analysis.rights.forEach(r => L.marker(r.pt, { icon: icon(r.signal === false ? 'nosig' : '', '右'), title: r.signal === false ? '信号なしの右折' : '右折' }).addTo(layer));
   c.analysis.merges.forEach(m => L.marker(m.pt, { icon: icon('merge', '合'), title: '合流' }).addTo(layer));
-  chooseWaypoints(c, +$('n').value).forEach((w, i) => L.marker(w.pt, { icon: icon('way', i + 1), title: `中継地点${i + 1}` }).addTo(layer));
-  map.fitBounds(line.getBounds(), { padding: [24, 24] });
+  const { stops, pins } = handoff(c, +$('n').value);
+  pins.forEach((w, i) => L.marker(w.pt, { icon: icon('way', i + 1), title: `中継地点${i + 1}` }).addTo(layer));
+  stops.forEach(s => L.marker(s.pt, { icon: icon('rest', '休'), title: s.name }).addTo(layer));
+  if (fit) map.fitBounds(line.getBounds(), { padding: [24, 24] });
 }
 function renderAll() {
   const c = state.candidates[state.selected];
@@ -628,6 +770,7 @@ function renderAll() {
     : !a.hasRoad ? 'このルートは道幅と山道を確認できていません。少し待ってから探し直してください。'
     : '山道の道幅データを取得できませんでした。少し待ってから探し直してください。';
   updateOpen();
+  ensureRest().catch(e => console.warn('rest', e.message));
 }
 function updateOpen() {
   const c = state.candidates[state.selected], link = $('open');
@@ -707,11 +850,12 @@ $('swap').addEventListener('click', () => {
   setPlace('from', t); setPlace('to', f); $('from-q').value = tq; $('to-q').value = fq;
 });
 $('n').addEventListener('change', () => { if (state.candidates.length) renderAll(); });
+$('rest').addEventListener('change', () => { if (state.candidates.length) ensureRest().catch(e => console.warn('rest', e.message)); });
 $('hw').addEventListener('change', () => say(state.candidates.length ? '高速の設定を変えました。ルートを探し直してください' : ''));
 $('ack').addEventListener('change', updateOpen);
 $('form').addEventListener('submit', run);
 initMap();
-window.__app = { state, setPlace, findRoutes, chooseWaypoints, mapsUrl, renderAll, score };
+window.__app = { state, setPlace, findRoutes, chooseWaypoints, mapsUrl, renderAll, score, handoff };
 </script>
 </body>
 </html>
